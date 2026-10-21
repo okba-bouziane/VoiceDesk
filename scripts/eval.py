@@ -17,6 +17,7 @@ import openai
 import psycopg
 
 from voicedesk.config import ROOT, get_settings, load_config
+from voicedesk.db import init_schema
 from voicedesk.evalrag import evaluate
 from voicedesk.graph import calendar_text
 from voicedesk.llm import StructuredOutputError, build_llm, structured_call
@@ -29,6 +30,7 @@ TODAY = dt.date(2026, 10, 21)
 
 
 def eval_rag(dsn: str) -> dict:
+    init_schema(dsn)
     ingest_documents(dsn)
     retriever = Retriever(dsn)
     try:
