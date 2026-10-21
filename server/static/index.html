@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VoiceDesk</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>VoiceDesk</h1>
+      <p id="clinic" class="muted">Voice receptionist demo</p>
+    </div>
+    <span id="state" class="pill" data-state="offline">offline</span>
+  </header>
+
+  <p class="notice">Sample data only. This is a fictional clinic; nothing you say is a real booking.</p>
+
+  <section class="controls">
+    <button id="connect">Start call</button>
+    <button id="mute" class="ghost" disabled>Mute mic</button>
+  </section>
+
+  <section class="panel">
+    <h2>Live transcript</h2>
+    <div id="transcript" aria-live="polite"><p class="muted empty">The conversation will appear here.</p></div>
+    <form id="chat" autocomplete="off">
+      <input id="text" placeholder="Or type a message instead of speaking" disabled>
+      <button class="ghost" disabled>Send</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Last turn latency</h2>
+    <table id="latency">
+      <tr><td>Endpointing + transcript</td><td data-k="eou_delay">-</td></tr>
+      <tr><td>LLM first token (LangGraph)</td><td data-k="llm_ttft">-</td></tr>
+      <tr><td>TTS first audio</td><td data-k="tts_ttfb">-</td></tr>
+      <tr class="total"><td>End to end</td><td data-k="end_to_end">-</td></tr>
+    </table>
+    <p class="muted small">Prompt version <span id="version">-</span>. Seconds, measured by the agent.</p>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.4/dist/livekit-client.umd.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
