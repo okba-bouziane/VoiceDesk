@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: voicedesk
+          POSTGRES_PASSWORD: voicedesk
+          POSTGRES_DB: voicedesk
+        ports: ["5434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U voicedesk" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      CI: "1"
+      DATABASE_URL: postgresql://voicedesk:voicedesk@localhost:5434/voicedesk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Lint
+        run: ruff check . && ruff format --check .
+      - name: Type check
+        run: mypy voicedesk booking_service agent server scripts
+      - name: Protobuf stubs are up to date
+        run: |
+          PYTHON=python scripts/gen_proto.sh
+          git diff --exit-code -- voicedesk/booking
+      - name: Download model files
+        run: python -m agent.main download-files
+      - name: Tests
+        run: pytest -q
+      - name: Eval gate (retrieval thresholds)
+        run: python -m scripts.eval
+      - uses: actions/upload-artifact@v4
+        with:
+          name: eval-results
+          path: docs/eval-results.json
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t voicedesk:ci .

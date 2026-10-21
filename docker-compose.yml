@@ -1,0 +1,88 @@
+# Host ports: 5434 (Postgres), 50051 (gRPC), 8000 (web + token server), 7880-7882 (LiveKit),
+# 9464 (agent metrics).
+x-app: &app
+  build: .
+  image: voicedesk:local
+  env_file:
+    - path: .env
+      required: false
+  environment: &app-env
+    DATABASE_URL: postgresql://voicedesk:voicedesk@db:5432/voicedesk
+    BOOKING_GRPC_ADDR: booking:50051
+    LIVEKIT_URL: ws://livekit:7880
+    LIVEKIT_PUBLIC_URL: ws://localhost:7880
+    LIVEKIT_API_KEY: devkey
+    LIVEKIT_API_SECRET: secret
+    # set TTS_PROVIDER=none in .env for a text-only demo (replies shown, not spoken)
+    TTS_PROVIDER: ${TTS_PROVIDER:-groq}
+    LLM_MODEL: ${LLM_MODEL:-}
+  restart: unless-stopped
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: voicedesk
+      POSTGRES_PASSWORD: voicedesk
+      POSTGRES_DB: voicedesk
+    ports:
+      - "5434:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voicedesk -d voicedesk"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  init:
+    <<: *app
+    command: ["python", "-m", "scripts.init_data"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  booking:
+    <<: *app
+    command: ["python", "-m", "booking_service"]
+    ports:
+      - "50051:50051"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+
+  livekit:
+    image: livekit/livekit-server:latest
+    command: ["--dev", "--bind", "0.0.0.0", "--node-ip", "127.0.0.1"]
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+
+  server:
+    <<: *app
+    command: ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      - livekit
+
+  agent:
+    <<: *app
+    command: ["python", "-m", "agent.main", "start"]
+    ports:
+      - "9464:9464"
+    environment:
+      <<: *app-env
+      AGENT_HTTP_PORT: "8090"
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      booking:
+        condition: service_started
+      livekit:
+        condition: service_started
+
+volumes:
+  pgdata:
