@@ -13,6 +13,15 @@ I built it to show a production-shaped voice-agent stack end to end, not a noteb
 - **Structured outputs** validated with Pydantic, with retry on invalid model output.
 - **MLOps basics**: prompts and model choices versioned in one YAML file, per-turn latency metrics (JSON logs and Prometheus), an eval gate in CI.
 
+**Live demo: https://voicedesk-beta.vercel.app** (press Start call, allow the microphone, or type). Sample data only.
+
+How the demo is hosted, and what that changes:
+- The web client and token function run on Vercel (`deploy/vercel/`); the agent runs on LiveKit Cloud Agents (`deploy/livekit-agent/`, 2 vCPU, eu-central), and the browser connects to LiveKit Cloud directly.
+- The hosted container has no Postgres. It runs the **same gRPC booking service on SQLite** and an **in-memory vector index** over the same fastembed embeddings (`BOOKING_STORE=sqlite`, `RAG_BACKEND=memory`). The in-memory index passes the same retrieval thresholds (recall@3 0.94, MRR 0.88 on the labelled set); the Postgres + pgvector path is what `docker compose` runs.
+- The demo uses the free Groq tier with `gpt-oss-20b`, so calls are capped at 150 seconds and 40 calls per day (counted in the agent). The token function adds best-effort per-IP and daily caps. When a cap or a free quota is hit the demo stops working until it resets.
+- Bookings live in the container, are visible to every caller of the demo, and disappear when the container restarts. Do not enter real personal data.
+- Resolving "next Sunday" is ambiguous even for people; in my live test the model chose 1 November, and the read-back before booking is what lets a caller correct it.
+
 ![Web client talking to the agent](docs/screenshots/web-client.png)
 
 ## Architecture
@@ -169,6 +178,12 @@ Budget for the time from the caller stopping to the first audio of the answer, a
 
 The honest summary: STT plus first LLM token was about 1.4 to 3.2 s on `gpt-oss-120b`. That is above a comfortable voice budget, mostly because each turn makes two sequential model calls (route, then extract or answer) on a reasoning model. Obvious next steps are listed under limitations.
 
+### Measured in a live room
+
+One spoken booking against the hosted demo (headless Chrome with a fake microphone playing a synthetic WAV, `scripts/live_check.js`): on the last turn the agent reported endpointing plus transcript 0.94 s, LLM first token 0.46 s and TTS first audio 0.19 s, 1.59 s from the end of the caller's speech to the first audio of the reply. That is one turn, not a distribution.
+
+![Live demo run](docs/screenshots/live-demo.png)
+
 ## Run it
 
 Prerequisites: Docker, and a free [Groq](https://console.groq.com) key for the default providers.
@@ -235,7 +250,7 @@ tests/            pytest suite
 
 ## Limitations
 
-- **Voice latency with TTS and live speech is not measured.** The Groq TTS model needs terms accepted by the org admin; until then I only ran STT, graph and text-mode sessions end to end. The agent has been run in a real LiveKit room from a headless browser in text mode, not with spoken audio.
+- Voice latency is measured on a handful of turns only (the round-trip script and one live-room call with a synthetic voice). I have not tested real microphones, accents or noisy rooms.
 - Two sequential LLM calls per turn on a reasoning model are slow for voice. Likely fixes: run routing and extraction concurrently, use a small non-reasoning model for them, and cache the routing prompt.
 - Dates and times are resolved by the model with a calendar hint; the gRPC service rejects impossible values, but a wrong-but-valid date would be booked after the caller confirms the read-back. The read-back is the safeguard.
 - Appointments are identified by phone number only (no real authentication), and a booking is a sample record, not a real system of record.
