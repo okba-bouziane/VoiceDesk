@@ -163,9 +163,9 @@ Budget for the time from the caller stopping to the first audio of the answer, a
 |---|---|---|
 | Endpointing (VAD plus turn detector wait) | 0.5 s min delay (configurable) | not measured (needs live speech) |
 | STT, Groq `whisper-large-v3-turbo` | < 0.5 s | 0.33, 0.38, 0.60 s on three short synthetic utterances (macOS `say`) |
-| Graph and LLM, first token | < 1 s | `gpt-oss-120b`: 1.1, 1.8, 2.6 s (3 turns, route plus extract or answer are sequential LLM calls). `gpt-oss-20b` through the full stack in text mode: mean 0.82 s over 4 turns |
-| TTS first audio | < 0.4 s | **not measured**: Groq's TTS model requires the organisation admin to accept its terms in the Groq console, which has not been done |
-| End to end | about 2 s | **not measured**: needs TTS and a live microphone |
+| Graph and LLM, first token | < 1 s | `gpt-oss-20b`: 0.66, 0.79, 0.73 s. `gpt-oss-120b`: 1.1, 1.8, 2.6 s (3 turns, route plus extract or answer are sequential LLM calls). `gpt-oss-20b` through the full stack in text mode: mean 0.82 s over 4 turns |
+| TTS first audio, Groq Orpheus | < 0.4 s | 0.53, 0.24, 0.24 s (first sentence of each reply, same 3 turns) |
+| STT + LLM first token + TTS first audio (sum, no endpointing wait) | about 2 s | 1.57, 1.33, 1.27 s with `gpt-oss-20b` (`scripts/voice_roundtrip.py`, sequential stages, not a live room) |
 
 The honest summary: STT plus first LLM token was about 1.4 to 3.2 s on `gpt-oss-120b`. That is above a comfortable voice budget, mostly because each turn makes two sequential model calls (route, then extract or answer) on a reasoning model. Obvious next steps are listed under limitations.
 

@@ -31,6 +31,7 @@ def prewarm(proc: JobProcess) -> None:
 server = AgentServer(
     setup_fnc=prewarm,
     port=int(os.getenv("AGENT_HTTP_PORT", "8090")),
+    num_idle_processes=int(os.getenv("AGENT_IDLE_PROCESSES", "2")),
     prometheus_port=int(os.getenv("AGENT_METRICS_PORT", "9464")),
     prometheus_multiproc_dir=os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp/voicedesk-prom"),
 )
@@ -71,6 +72,23 @@ async def entrypoint(ctx: JobContext) -> None:
         retriever.close()
 
     ctx.add_shutdown_callback(_cleanup)
+
+    max_seconds = int(os.getenv("MAX_CALL_SECONDS", "0"))
+
+    async def _call_timer() -> None:
+        """Demo guard: end long calls so a public demo cannot burn the free provider quotas."""
+        await asyncio.sleep(max(max_seconds - 15, 1))
+        notice = "We have reached the time limit of this demo call. Thank you, goodbye."
+        if settings.tts_provider == "none":
+            await ctx.room.local_participant.send_text(notice, topic="lk.transcription")
+        else:
+            await session.say(notice, allow_interruptions=False)
+        await asyncio.sleep(1)
+        ctx.shutdown(reason="max call duration")
+
+    timer = asyncio.ensure_future(_call_timer()) if max_seconds else None
+    if timer:
+        ctx.add_shutdown_callback(lambda: timer.cancel())  # type: ignore[arg-type, return-value]
 
     agent = ReceptionAgent()
     await session.start(agent=agent, room=ctx.room)

@@ -34,3 +34,15 @@ def test_metrics_count_tokens_and_requests():
 def test_index_and_config():
     assert "VoiceDesk" in client.get("/").text
     assert client.get("/api/config").json()["version"]
+
+
+def test_session_limiter_daily_and_per_ip_caps():
+    from server.app import SessionLimiter
+
+    lim = SessionLimiter(daily_cap=3, per_ip_hour=2)
+    t = 1_000_000.0
+    assert lim.check("a", t) is None and lim.check("a", t + 1) is None
+    assert "several calls" in (lim.check("a", t + 2) or "")
+    assert lim.check("a", t + 4000) is None  # hourly window slid, and this is call 3 of the day
+    assert "daily demo limit" in (lim.check("b", t + 4001) or "")
+    assert lim.check("b", t + 90_000) is None  # next UTC day resets the counter
