@@ -1,0 +1,86 @@
+# Versioned prompts, model choices and quality thresholds.
+# Bump `version` whenever a prompt or a default model changes; the value is
+# attached to every logged turn and exported as a Prometheus label.
+version: "2026.10.1"
+
+clinic:
+  name: "Riad Sample Clinic"
+  note: "Sample data - fictional clinic"
+
+models:
+  llm:
+    groq:   {base_url: "https://api.groq.com/openai/v1", model: "openai/gpt-oss-120b"}
+    openai: {base_url: "https://api.openai.com/v1",      model: "gpt-4o-mini"}
+    ollama: {base_url: "http://localhost:11434/v1",      model: "llama3.1:8b"}
+  stt:
+    groq:     {model: "whisper-large-v3-turbo"}
+    openai:   {model: "gpt-4o-mini-transcribe"}
+    deepgram: {model: "nova-3"}
+  tts:
+    groq:       {model: "canopylabs/orpheus-v1-english", voice: "autumn"}
+    openai:     {model: "gpt-4o-mini-tts", voice: "alloy"}
+    cartesia:   {model: "sonic-2"}
+  embedding:
+    model: "BAAI/bge-small-en-v1.5"
+    dimensions: 384
+    query_prefix: "Represent this sentence for searching relevant passages: "
+
+rag:
+  top_k: 3
+  candidates: 20
+  rrf_k: 60
+  # Below this cosine similarity (best vector hit) and without a full-text hit
+  # the agent says it does not know instead of guessing.
+  min_similarity: 0.45
+
+turn:
+  endpointing_min_delay: 0.5
+  endpointing_max_delay: 3.0
+  max_history_messages: 8
+
+eval_gate:
+  rag_recall_at_3_min: 0.90
+  rag_mrr_min: 0.85
+  rag_abstain_min: 0.85
+  structured_validity_min: 1.0
+  routing_accuracy_min_live: 0.85
+
+prompts:
+  router: |
+    You route caller messages for the phone desk of {clinic}, a medical clinic.
+    Classify the caller's latest message into exactly one intent:
+    - book_appointment: wants to make an appointment, or is giving details for one
+    - check_availability: asks which times or days are free, without committing
+    - cancel_appointment: wants to cancel an appointment
+    - list_appointments: asks about their existing appointments
+    - clinic_info: asks a question about the clinic (hours, prices, insurance, policies, preparation, location)
+    - confirm: says yes or agrees to what the assistant just asked
+    - decline: says no or refuses what the assistant just asked
+    - handoff: asks for a human, is upset, or describes a medical emergency
+    - smalltalk: greeting, thanks, goodbye
+    - other: anything unrelated to the clinic
+    Active flow: {flow}. The assistant is waiting for a yes or no: {awaiting}.
+    Reply with JSON only: {{"intent": "<one of the intents>", "confidence": <0..1>}}
+  extract_booking: |
+    Extract appointment details from the caller's latest message for {clinic}.
+    Today is {today} ({weekday}). Resolve relative dates ("tomorrow", "next Monday") to YYYY-MM-DD using this calendar
+    of the next 14 days: {calendar}.
+    Specialties offered: {specialties}.
+    Only fill fields the caller actually stated; use null for everything else.
+    Times use 24h HH:MM. Phone numbers keep digits only (a leading + is allowed).
+    Already known: {known}
+    Reply with JSON only: {{"specialty": str|null, "date": str|null, "time": str|null,
+    "patient_name": str|null, "patient_phone": str|null, "reason": str|null,
+    "appointment_date": str|null}}
+    ("appointment_date" is the date of an existing appointment the caller refers to.)
+  faq_answer: |
+    You are the voice receptionist of {clinic}. Answer ONLY the caller's latest question using ONLY
+    the context below. Speak naturally in at most three short sentences, no lists, no
+    markdown, no emojis. If the context does not contain the answer, say you are not sure
+    and offer to connect a staff member.
+    Context:
+    {context}
+  smalltalk: |
+    You are the friendly voice receptionist of {clinic}. Reply to the caller in one short
+    sentence, then ask how you can help with an appointment or a question about the clinic.
+    No markdown, no emojis.

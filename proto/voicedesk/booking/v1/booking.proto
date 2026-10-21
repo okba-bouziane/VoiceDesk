@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package voicedesk.booking.v1;
+
+// Booking contract for the sample clinic. All dates and times are clinic-local
+// (Africa/Algiers); the service never converts time zones.
+service BookingService {
+  // Open slots for a specialty (or one provider) on a given date.
+  rpc CheckAvailability(CheckAvailabilityRequest) returns (CheckAvailabilityResponse);
+  // Book one slot. Fails with ALREADY_EXISTS when the slot has just been taken.
+  rpc BookAppointment(BookAppointmentRequest) returns (BookAppointmentResponse);
+  // Cancel an appointment; the caller must prove ownership with the phone number.
+  rpc CancelAppointment(CancelAppointmentRequest) returns (CancelAppointmentResponse);
+  // Upcoming and past appointments of one patient, identified by phone number.
+  rpc ListAppointments(ListAppointmentsRequest) returns (ListAppointmentsResponse);
+}
+
+enum AppointmentStatus {
+  APPOINTMENT_STATUS_UNSPECIFIED = 0;
+  APPOINTMENT_STATUS_BOOKED = 1;
+  APPOINTMENT_STATUS_CANCELLED = 2;
+}
+
+message Slot {
+  string provider_id = 1;
+  string provider_name = 2;
+  string specialty = 3;
+  string date = 4;        // YYYY-MM-DD
+  string start_time = 5;  // HH:MM, 24h
+  int32 duration_minutes = 6;
+}
+
+message Appointment {
+  string appointment_id = 1;
+  string patient_name = 2;
+  string patient_phone = 3;
+  Slot slot = 4;
+  string reason = 5;
+  AppointmentStatus status = 6;
+}
+
+message CheckAvailabilityRequest {
+  string specialty = 1;    // required unless provider_id is set
+  string provider_id = 2;  // optional
+  string date = 3;         // YYYY-MM-DD, required
+  int32 limit = 4;         // max slots returned, 0 = default (10)
+}
+
+message CheckAvailabilityResponse {
+  repeated Slot slots = 1;
+}
+
+message BookAppointmentRequest {
+  string patient_name = 1;
+  string patient_phone = 2;
+  string provider_id = 3;  // optional when specialty is set (first free provider is used)
+  string specialty = 4;
+  string date = 5;
+  string start_time = 6;
+  string reason = 7;
+}
+
+message BookAppointmentResponse {
+  Appointment appointment = 1;
+}
+
+message CancelAppointmentRequest {
+  string appointment_id = 1;
+  string patient_phone = 2;
+}
+
+message CancelAppointmentResponse {
+  Appointment appointment = 1;
+}
+
+message ListAppointmentsRequest {
+  string patient_phone = 1;
+  bool include_cancelled = 2;
+}
+
+message ListAppointmentsResponse {
+  repeated Appointment appointments = 1;
+}

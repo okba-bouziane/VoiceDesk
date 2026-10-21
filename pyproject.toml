@@ -1,0 +1,32 @@
+[project]
+name = "voicedesk"
+version = "0.1.0"
+description = "Voice receptionist for a sample clinic: LiveKit Agents, LangGraph, gRPC, pgvector"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+
+[tool.setuptools.packages.find]
+include = ["voicedesk*", "booking_service*", "agent*", "server*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+markers = ["live: needs a real LLM key (skipped when GROQ_API_KEY/OPENAI_API_KEY is absent)"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["voicedesk/booking/v1"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "UP047"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = ["voicedesk/booking/v1/", "tests/"]
+check_untyped_defs = true
