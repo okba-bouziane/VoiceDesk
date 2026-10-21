@@ -12,6 +12,7 @@ from grpc_health.v1 import health_pb2, health_pb2_grpc
 from grpc_reflection.v1alpha import reflection_pb2, reflection_pb2_grpc
 
 from booking_service.server import build_server
+from booking_service.sqlite_store import SqliteBookingStore
 from booking_service.store import BookingStore
 from voicedesk.booking.v1 import booking_pb2 as pb
 from voicedesk.booking.v1 import booking_pb2_grpc as pb_grpc
@@ -21,11 +22,16 @@ SUN, MON, FRI = "2026-10-25", "2026-10-26", "2026-10-23"
 PHONE = "0555123456"
 
 
-@pytest.fixture
-def stub(dsn):
-    with psycopg.connect(dsn, autocommit=True) as c:
-        c.execute("TRUNCATE appointments")
-    store = BookingStore(dsn, clock=lambda: NOW)
+@pytest.fixture(params=["postgres", "sqlite"])
+def stub(request, tmp_path):
+    """The same contract tests run against both storage backends."""
+    if request.param == "postgres":
+        dsn = request.getfixturevalue("dsn")
+        with psycopg.connect(dsn, autocommit=True) as c:
+            c.execute("TRUNCATE appointments")
+        store = BookingStore(dsn, clock=lambda: NOW)
+    else:
+        store = SqliteBookingStore(str(tmp_path / "t.db"), clock=lambda: NOW)
     server, port = build_server(store, "127.0.0.1:0")
     server.start()
     channel = grpc.insecure_channel(f"127.0.0.1:{port}")

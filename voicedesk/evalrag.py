@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 
 from .config import ROOT
-from .rag import Mode, Retriever, is_relevant
+from .rag import MemoryRetriever, Mode, Retriever, is_relevant
 
 QUESTIONS = ROOT / "data" / "eval" / "rag_questions.json"
 
@@ -21,7 +21,7 @@ class RagReport:
     abstain_accuracy: float | None = None
 
 
-def evaluate(retriever: Retriever, mode: Mode, k: int = 3) -> RagReport:
+def evaluate(retriever: Retriever | MemoryRetriever, mode: Mode, k: int = 3) -> RagReport:
     data = json.loads(QUESTIONS.read_text(encoding="utf-8"))
     hits_at_k, rr = 0, 0.0
     for item in data["in_scope"]:

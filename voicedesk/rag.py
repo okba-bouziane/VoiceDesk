@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -147,3 +148,100 @@ def is_relevant(hits: list[Hit], min_similarity: float) -> bool:
         return False
     best = max((h.similarity or 0.0) for h in hits)
     return best >= min_similarity
+
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+_STOP = {
+    "the",
+    "a",
+    "an",
+    "is",
+    "are",
+    "do",
+    "you",
+    "your",
+    "i",
+    "my",
+    "can",
+    "to",
+    "of",
+    "and",
+    "or",
+    "in",
+    "on",
+    "at",
+    "for",
+    "it",
+    "what",
+    "how",
+    "me",
+    "we",
+    "be",
+    "if",
+    "there",
+}
+
+
+def _terms(text: str) -> list[str]:
+    return [t for t in _TOKEN_RE.findall(text.lower()) if t not in _STOP]
+
+
+class MemoryRetriever:
+    """Hosted-demo backend (`RAG_BACKEND=memory`): the same fastembed vectors and the same
+    RRF fusion, but held in memory with a small BM25 ranking instead of Postgres + pgvector."""
+
+    def __init__(self, docs_dir: Path = DOCS_DIR) -> None:
+        cfg = load_config()["rag"]
+        self.top_k: int = cfg["top_k"]
+        self._candidates: int = cfg["candidates"]
+        self._rrf_k: int = cfg["rrf_k"]
+        self.min_similarity: float = cfg["min_similarity"]
+        self._chunks = [c for p in sorted(docs_dir.glob("*.md")) for c in chunk_markdown(p)]
+        self._vectors = np.stack(embed_documents([f"{h}. {b}" for _, h, b in self._chunks]))
+        self._vectors /= np.linalg.norm(self._vectors, axis=1, keepdims=True)
+        self._tokens = [_terms(f"{h} {b}") for _, h, b in self._chunks]
+        self._avg_len = sum(len(t) for t in self._tokens) / len(self._tokens)
+        df: dict[str, int] = {}
+        for toks in self._tokens:
+            for term in set(toks):
+                df[term] = df.get(term, 0) + 1
+        n = len(self._tokens)
+        self._idf = {t: math.log(1 + (n - c + 0.5) / (c + 0.5)) for t, c in df.items()}
+
+    def close(self) -> None:
+        pass
+
+    def _bm25(self, query: list[str]) -> list[float]:
+        k1, b = 1.5, 0.75
+        scores = []
+        for toks in self._tokens:
+            score = 0.0
+            for term in set(query):
+                tf = toks.count(term)
+                if tf:
+                    norm = tf + k1 * (1 - b + b * len(toks) / self._avg_len)
+                    score += self._idf.get(term, 0.0) * tf * (k1 + 1) / norm
+            scores.append(score)
+        return scores
+
+    def search(self, question: str, k: int | None = None, mode: Mode = "hybrid") -> list[Hit]:
+        k = k or self.top_k
+        vec_rows: list = []
+        fts_rows: list = []
+        if mode != "fts":
+            q = embed_query(question)
+            sims = self._vectors @ (q / np.linalg.norm(q))
+            for i in np.argsort(-sims)[: self._candidates]:
+                src, head, body = self._chunks[i]
+                vec_rows.append((int(i), src, head, body, float(sims[i])))
+        if mode != "vector":
+            bm = self._bm25(_terms(question))
+            for i in np.argsort(-np.asarray(bm))[: self._candidates]:
+                if bm[i] > 0:
+                    src, head, body = self._chunks[i]
+                    fts_rows.append((int(i), src, head, body, bm[i]))
+        return fuse(vec_rows, fts_rows, k, self._rrf_k)
+
+
+def build_retriever(dsn: str, backend: str = "postgres") -> Retriever | MemoryRetriever:
+    return MemoryRetriever() if backend == "memory" else Retriever(dsn)

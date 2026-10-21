@@ -15,6 +15,7 @@ from grpc_reflection.v1alpha import reflection
 from voicedesk.booking.v1 import booking_pb2 as pb
 from voicedesk.booking.v1 import booking_pb2_grpc as pb_grpc
 
+from .sqlite_store import SqliteBookingStore
 from .store import AppointmentRow, BookingStore, SlotRow
 from .validation import ServiceError
 
@@ -49,7 +50,7 @@ def _appt_pb(a: AppointmentRow) -> pb.Appointment:
 
 
 class BookingServicer(pb_grpc.BookingServiceServicer):
-    def __init__(self, store: BookingStore) -> None:
+    def __init__(self, store: BookingStore | SqliteBookingStore) -> None:
         self._store = store
 
     def _guard(self, context: grpc.ServicerContext, fn):  # type: ignore[no-untyped-def]
@@ -102,7 +103,9 @@ class BookingServicer(pb_grpc.BookingServiceServicer):
         return self._guard(context, run)
 
 
-def build_server(store: BookingStore, address: str = "[::]:0") -> tuple[grpc.Server, int]:
+def build_server(
+    store: BookingStore | SqliteBookingStore, address: str = "[::]:0"
+) -> tuple[grpc.Server, int]:
     """Create (not start) a server. Port 0 picks a free port; used by the tests."""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     pb_grpc.add_BookingServiceServicer_to_server(BookingServicer(store), server)
@@ -131,17 +134,20 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()
-    for attempt in range(30):  # wait for Postgres to accept connections
-        try:
-            init_schema(settings.database_url)
-            break
-        except Exception as err:  # noqa: BLE001
-            log.warning("database not ready (%s), retry %d", err, attempt + 1)
-            time.sleep(2)
+    store: BookingStore | SqliteBookingStore
+    if os.getenv("BOOKING_STORE", "postgres") == "sqlite":
+        store = SqliteBookingStore(os.getenv("SQLITE_PATH", "/tmp/voicedesk.db"))
     else:
-        raise SystemExit("database never became ready")
-
-    store = BookingStore(settings.database_url)
+        for attempt in range(30):  # wait for Postgres to accept connections
+            try:
+                init_schema(settings.database_url)
+                break
+            except Exception as err:  # noqa: BLE001
+                log.warning("database not ready (%s), retry %d", err, attempt + 1)
+                time.sleep(2)
+        else:
+            raise SystemExit("database never became ready")
+        store = BookingStore(settings.database_url)
     server, port = build_server(store, f"[::]:{os.getenv('GRPC_PORT', '50051')}")
     server.start()
     log.info("booking service listening on %d", port)

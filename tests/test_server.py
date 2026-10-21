@@ -37,7 +37,7 @@ def test_index_and_config():
 
 
 def test_session_limiter_daily_and_per_ip_caps():
-    from server.app import SessionLimiter
+    from server.limiter import SessionLimiter
 
     lim = SessionLimiter(daily_cap=3, per_ip_hour=2)
     t = 1_000_000.0

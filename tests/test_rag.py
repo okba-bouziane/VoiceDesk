@@ -47,3 +47,20 @@ def test_recall_threshold(retriever, mode):
         assert report.abstain_accuracy >= gate["rag_abstain_min"]
     else:
         assert report.recall_at_k >= 0.9  # baselines must stay sane too
+
+
+@pytest.fixture(scope="module")
+def memory_retriever():
+    from voicedesk.rag import MemoryRetriever
+
+    return MemoryRetriever()
+
+
+def test_memory_backend_meets_the_same_retrieval_thresholds(memory_retriever):
+    """The hosted demo has no Postgres: its in-memory index must be just as good."""
+    report = evaluate(memory_retriever, "hybrid", k=3)
+    print(report)
+    gate = load_config()["eval_gate"]
+    assert report.recall_at_k >= gate["rag_recall_at_3_min"]
+    assert report.mrr >= gate["rag_mrr_min"]
+    assert report.abstain_accuracy >= gate["rag_abstain_min"]

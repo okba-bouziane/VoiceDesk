@@ -8,12 +8,12 @@ from .booking_client import GrpcBookingTools
 from .config import Settings, get_settings, load_config
 from .graph import Deps, build_graph
 from .llm import build_llm
-from .rag import Hit, Retriever
+from .rag import Hit, build_retriever
 
 
 def build_runtime(settings: Settings | None = None):  # type: ignore[no-untyped-def]
     settings = settings or get_settings()
-    retriever = Retriever(settings.database_url)
+    retriever = build_retriever(settings.database_url, settings.rag_backend)
 
     async def search(question: str) -> list[Hit]:
         return await asyncio.to_thread(retriever.search, question)

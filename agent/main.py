@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
+import time
+from pathlib import Path
 from typing import Any
 
 from livekit.agents import AgentServer, AgentSession, JobContext, JobProcess, cli
@@ -30,16 +33,47 @@ def prewarm(proc: JobProcess) -> None:
 
 server = AgentServer(
     setup_fnc=prewarm,
-    port=int(os.getenv("AGENT_HTTP_PORT", "8090")),
+    port=int(os.getenv("AGENT_HTTP_PORT", "8081")),
     num_idle_processes=int(os.getenv("AGENT_IDLE_PROCESSES", "2")),
     prometheus_port=int(os.getenv("AGENT_METRICS_PORT", "9464")),
     prometheus_multiproc_dir=os.getenv("PROMETHEUS_MULTIPROC_DIR", "/tmp/voicedesk-prom"),
 )
 
 
+def daily_cap_reached() -> bool:
+    """Hosted-demo guard shared by all job processes: counts calls per UTC day in a file."""
+    cap = int(os.getenv("DEMO_DAILY_SESSION_CAP", "0"))
+    if not cap:
+        return False
+    path = Path(os.getenv("DEMO_COUNTER_PATH", "/tmp/voicedesk-calls.json"))
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    with open(path.with_suffix(".lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, ValueError):
+            data = {}
+        if data.get("day") != today:
+            data = {"day": today, "count": 0}
+        if data["count"] >= cap:
+            return True
+        data["count"] += 1
+        path.write_text(json.dumps(data))
+    return False
+
+
 @server.rtc_session()
 async def entrypoint(ctx: JobContext) -> None:
     settings = get_settings()
+    if daily_cap_reached():
+        await ctx.connect()
+        await ctx.room.local_participant.send_text(
+            "The daily demo limit has been reached. Please try again tomorrow.",
+            topic="lk.transcription",
+        )
+        await asyncio.sleep(2)
+        ctx.shutdown(reason="daily cap")
+        return
     graph, tools, retriever = build_runtime(settings)
     version = load_config()["version"]
     ctx.log_context_fields = {"room": ctx.room.name}

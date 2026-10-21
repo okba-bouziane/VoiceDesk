@@ -42,6 +42,7 @@ class Settings(BaseSettings):
 
     database_url: str = Field(default="postgresql://voicedesk:voicedesk@localhost:5434/voicedesk")
     booking_grpc_addr: str = "localhost:50051"
+    rag_backend: str = "postgres"  # "memory" for the hosted demo (no Postgres)
 
     @property
     def effective_llm_key(self) -> str:
