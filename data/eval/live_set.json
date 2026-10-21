@@ -1,0 +1,163 @@
+{
+ "intents": [
+  {
+   "text": "Hi, I'd like to make an appointment",
+   "intent": "book_appointment"
+  },
+  {
+   "text": "Can I see a dermatologist next week?",
+   "intent": "book_appointment"
+  },
+  {
+   "text": "I need to book my son in for a check-up",
+   "intent": "book_appointment"
+  },
+  {
+   "text": "Book me with the dentist on Sunday morning",
+   "intent": "book_appointment"
+  },
+  {
+   "text": "Do you have anything free on Monday for general medicine?",
+   "intent": "check_availability"
+  },
+  {
+   "text": "Which days is Dr. Ferhat available?",
+   "intent": "check_availability"
+  },
+  {
+   "text": "What times are open tomorrow afternoon?",
+   "intent": "check_availability"
+  },
+  {
+   "text": "I need to cancel my appointment",
+   "intent": "cancel_appointment"
+  },
+  {
+   "text": "Please cancel Thursday's visit",
+   "intent": "cancel_appointment"
+  },
+  {
+   "text": "I can't make it anymore, can you remove my booking?",
+   "intent": "cancel_appointment"
+  },
+  {
+   "text": "What appointments do I have?",
+   "intent": "list_appointments"
+  },
+  {
+   "text": "When is my next visit?",
+   "intent": "list_appointments"
+  },
+  {
+   "text": "Can you check my bookings under 0555123456?",
+   "intent": "list_appointments"
+  },
+  {
+   "text": "What time do you open?",
+   "intent": "clinic_info"
+  },
+  {
+   "text": "How much is a consultation?",
+   "intent": "clinic_info"
+  },
+  {
+   "text": "Do you accept the CHIFA card?",
+   "intent": "clinic_info"
+  },
+  {
+   "text": "Where is the clinic?",
+   "intent": "clinic_info"
+  },
+  {
+   "text": "Do I need to fast before a blood test?",
+   "intent": "clinic_info"
+  },
+  {
+   "text": "What is your cancellation policy?",
+   "intent": "clinic_info"
+  },
+  {
+   "text": "Hello",
+   "intent": "smalltalk"
+  },
+  {
+   "text": "Thank you, that's all, goodbye",
+   "intent": "smalltalk"
+  },
+  {
+   "text": "Good morning!",
+   "intent": "smalltalk"
+  },
+  {
+   "text": "I want to speak to a real person",
+   "intent": "handoff"
+  },
+  {
+   "text": "This is useless, get me a human",
+   "intent": "handoff"
+  },
+  {
+   "text": "My father has chest pain and can't breathe",
+   "intent": "handoff"
+  },
+  {
+   "text": "What's the best recipe for couscous?",
+   "intent": "other"
+  },
+  {
+   "text": "Who is the president of France?",
+   "intent": "other"
+  },
+  {
+   "text": "Tell me a joke about football",
+   "intent": "other"
+  }
+ ],
+ "extracts": [
+  {
+   "text": "I'd like a dentist appointment tomorrow at 9:30",
+   "expected": {
+    "specialty": "dentistry",
+    "date": "2026-10-22",
+    "time": "09:30"
+   }
+  },
+  {
+   "text": "Next Sunday at 2 pm for dermatology",
+   "expected": {
+    "specialty": "dermatology",
+    "date": "2026-10-25",
+    "time": "14:00"
+   }
+  },
+  {
+   "text": "My name is Amina Haddad and my number is 0661 23 45 67",
+   "expected": {
+    "patient_name": "Amina Haddad",
+    "patient_phone": "0661234567"
+   }
+  },
+  {
+   "text": "It's for a general check-up on the 28th of October",
+   "expected": {
+    "specialty": "general medicine",
+    "date": "2026-10-28"
+   }
+  },
+  {
+   "text": "pediatrics please, Monday morning at ten",
+   "expected": {
+    "specialty": "pediatrics",
+    "date": "2026-10-26",
+    "time": "10:00"
+   }
+  },
+  {
+   "text": "Cancel the visit I have on the 25th, my phone is +213555000111",
+   "expected": {
+    "appointment_date": "2026-10-25",
+    "patient_phone": "+213555000111"
+   }
+  }
+ ]
+}

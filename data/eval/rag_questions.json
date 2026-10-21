@@ -1,0 +1,172 @@
+{
+ "in_scope": [
+  {
+   "question": "What time do you open in the morning?",
+   "source": "opening-hours.md",
+   "heading_contains": "Opening hours"
+  },
+  {
+   "question": "Are you open on Saturdays?",
+   "source": "opening-hours.md",
+   "heading_contains": "Opening hours"
+  },
+  {
+   "question": "Is there a lunch break?",
+   "source": "opening-hours.md",
+   "heading_contains": "Lunch break"
+  },
+  {
+   "question": "Where is the clinic located?",
+   "source": "opening-hours.md",
+   "heading_contains": "Address"
+  },
+  {
+   "question": "Is there parking nearby?",
+   "source": "opening-hours.md",
+   "heading_contains": "Address"
+  },
+  {
+   "question": "Is there a lift or step free access?",
+   "source": "opening-hours.md",
+   "heading_contains": "Address"
+  },
+  {
+   "question": "What should I do in a medical emergency?",
+   "source": "opening-hours.md",
+   "heading_contains": "urgent"
+  },
+  {
+   "question": "Which specialties do you offer?",
+   "source": "services.md",
+   "heading_contains": "Specialties"
+  },
+  {
+   "question": "Do you do dental implants or braces?",
+   "source": "services.md",
+   "heading_contains": "Dentistry"
+  },
+  {
+   "question": "Can you check a mole on my skin?",
+   "source": "services.md",
+   "heading_contains": "Dermatology"
+  },
+  {
+   "question": "From what age do you see children?",
+   "source": "services.md",
+   "heading_contains": "Pediatrics"
+  },
+  {
+   "question": "Can I get a blood test at the clinic?",
+   "source": "services.md",
+   "heading_contains": "Laboratory"
+  },
+  {
+   "question": "Who are the general practitioners?",
+   "source": "services.md",
+   "heading_contains": "General medicine"
+  },
+  {
+   "question": "How much does a general consultation cost?",
+   "source": "fees-and-insurance.md",
+   "heading_contains": "Consultation fees"
+  },
+  {
+   "question": "Can I pay by card?",
+   "source": "fees-and-insurance.md",
+   "heading_contains": "Payment methods"
+  },
+  {
+   "question": "Do you accept the CHIFA card?",
+   "source": "fees-and-insurance.md",
+   "heading_contains": "Health insurance"
+  },
+  {
+   "question": "Will my private insurer pay you directly?",
+   "source": "fees-and-insurance.md",
+   "heading_contains": "Private insurance"
+  },
+  {
+   "question": "Do I have to pay a deposit when booking?",
+   "source": "fees-and-insurance.md",
+   "heading_contains": "Uninsured"
+  },
+  {
+   "question": "How long before can I cancel without a fee?",
+   "source": "appointment-policies.md",
+   "heading_contains": "Cancellation"
+  },
+  {
+   "question": "How do I change the time of my appointment?",
+   "source": "appointment-policies.md",
+   "heading_contains": "Rescheduling"
+  },
+  {
+   "question": "What happens if I arrive late?",
+   "source": "appointment-policies.md",
+   "heading_contains": "Late arrivals"
+  },
+  {
+   "question": "What documents should I bring to the visit?",
+   "source": "appointment-policies.md",
+   "heading_contains": "What to bring"
+  },
+  {
+   "question": "How far ahead can I book?",
+   "source": "appointment-policies.md",
+   "heading_contains": "Booking"
+  },
+  {
+   "question": "Do I need to fast before a blood test?",
+   "source": "patient-info.md",
+   "heading_contains": "Fasting"
+  },
+  {
+   "question": "How do I get my test results?",
+   "source": "patient-info.md",
+   "heading_contains": "Test results"
+  },
+  {
+   "question": "Can you renew my prescription over the phone?",
+   "source": "patient-info.md",
+   "heading_contains": "Prescriptions"
+  },
+  {
+   "question": "Do you give yellow fever vaccines for travel?",
+   "source": "patient-info.md",
+   "heading_contains": "Vaccinations"
+  },
+  {
+   "question": "Can I get a copy of my medical file?",
+   "source": "patient-info.md",
+   "heading_contains": "certificates"
+  },
+  {
+   "question": "Can I bring someone with me?",
+   "source": "visit-rules.md",
+   "heading_contains": "Companions"
+  },
+  {
+   "question": "Which languages do the staff speak?",
+   "source": "visit-rules.md",
+   "heading_contains": "Interpreters"
+  },
+  {
+   "question": "Is the toilet wheelchair accessible?",
+   "source": "visit-rules.md",
+   "heading_contains": "Accessibility"
+  },
+  {
+   "question": "How do I make a complaint?",
+   "source": "visit-rules.md",
+   "heading_contains": "Feedback"
+  }
+ ],
+ "out_of_scope": [
+  "What is the weather like on Mars?",
+  "Who won the football match yesterday?",
+  "How do I change a flat tyre?",
+  "What is the capital of Australia?",
+  "Can you recommend a good pizza restaurant?",
+  "Explain how blockchain works"
+ ]
+}
