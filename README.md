@@ -119,6 +119,8 @@ The LiveKit side is thin (`agent/`): `LLMAdapter(graph, stream_mode="custom")` f
 | Cancelling twice or cancelling a past appointment | `FAILED_PRECONDITION` |
 | Anything unexpected | `INTERNAL` (details logged, not leaked) |
 
+The business rules (validation, free-slot computation, cancel rules) live once in `booking_service/rules.py`; the Postgres and SQLite stores only differ in how they read and write rows.
+
 It also serves the standard `grpc.health.v1.Health` service and gRPC reflection, so `grpcurl -plaintext localhost:50051 list` works.
 
 ## Evaluation
@@ -144,7 +146,7 @@ Hybrid recall@1 is 0.875. The "answer or abstain" gate classifies 35 of 38 quest
 
 The sets are small, so treat these as smoke-level numbers, not benchmarks. An earlier 20b run resolved "next Sunday" to the wrong date, which is why the extraction prompt now carries a 14-day calendar.
 
-**Tests** (`pytest`): 74 tests, 71 run offline, 3 live ones need an LLM key.
+**Tests** (`pytest`): 105 tests. The ones that need Postgres with pgvector skip when it is not reachable (CI runs them against a pgvector service), and the 3 live ones need an LLM key.
 
 | File | What it covers |
 |---|---|
@@ -154,6 +156,7 @@ The sets are small, so treat these as smoke-level numbers, not benchmarks. An ea
 | `test_graph.py` | Routing table, full booking with slot filling, slot taken, closed day, decline, cancel, list, grounded FAQ with token streaming, refusal, handoff, provider outage. Uses a scripted model (a test double that exists only in `tests/fakes.py`). |
 | `test_agent_text.py` | LiveKit `AgentSession` text-mode runs (`session.run(user_input=...)`) driving the real adapter and graph. |
 | `test_live.py` | Same style, real model and LiveKit's LLM judge (`.judge(...)`). Skipped without a key. |
+| `test_rules.py` | Booking rules shared by both stores (free slots, limits, cancel rules), phone normalisation, the demo daily cap. |
 | `test_server.py`, `test_metrics.py` | Token endpoint and metrics, per-turn latency aggregation. |
 
 Thresholds live in `config/voicedesk.yaml` (`eval_gate`) and are enforced by pytest and by `scripts/eval.py`, which CI runs.
@@ -230,16 +233,22 @@ scripts/gen_proto.sh                         # regenerate stubs after editing th
 | `TURN_DETECTION` | `model` | `model` (LiveKit turn-detector model) or `vad` |
 | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | `ws://localhost:7880`, `devkey`, `secret` | LiveKit dev server credentials (dev defaults only) |
 | `DATABASE_URL` | `postgresql://voicedesk:voicedesk@localhost:5434/voicedesk` | Postgres |
-| `BOOKING_GRPC_ADDR` | `localhost:50051` | Booking service |
+| `BOOKING_GRPC_ADDR` | `localhost:50051` | Booking service address used by the agent |
+| `GRPC_PORT` | `50051` | Port the booking service listens on |
+| `BOOKING_STORE`, `SQLITE_PATH` | `postgres`, `/tmp/voicedesk.db` | `sqlite` runs the booking service without Postgres (hosted demo) |
+| `RAG_BACKEND` | `postgres` | `memory` keeps the vector index in memory (hosted demo) |
+| `MAX_CALL_SECONDS` | `0` | Hard limit per call in seconds, 0 for none |
+| `DEMO_DAILY_SESSION_CAP`, `DEMO_PER_IP_HOURLY_CAP` | `0` | Call caps for a public demo, 0 for none (the per-IP cap applies to the token server only) |
+| `AGENT_HTTP_PORT`, `AGENT_METRICS_PORT`, `AGENT_IDLE_PROCESSES` | `8081`, `9464`, `2` | Agent worker ports and warm process count |
 
 Prompts, default models per provider, RAG parameters, endpointing delays and eval thresholds are in `config/voicedesk.yaml`; bump its `version` when you change a prompt (it is attached to every metric).
 
 ## Project layout
 
 ```
-agent/            LiveKit worker: session setup, providers, per-turn metrics
-booking_service/  gRPC server, Postgres store, validation
-voicedesk/        config, structured schemas, LLM client, RAG, LangGraph graph, gRPC client
+agent/            LiveKit worker: session setup, providers, per-turn metrics, demo guards
+booking_service/  gRPC server, shared business rules, Postgres and SQLite stores, validation
+voicedesk/        settings, structured schemas, LLM client, RAG, LangGraph graph, gRPC client
 server/           FastAPI token server, /healthz, /metrics, web client (static)
 proto/            Protobuf contract
 config/           versioned prompts, models and thresholds

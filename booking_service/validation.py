@@ -8,14 +8,14 @@ import uuid
 
 import grpc
 
+from voicedesk import phone
+
 SLOT_MINUTES = 30
 OPEN_DAYS = {6, 0, 1, 2, 3}  # Sunday to Thursday (date.weekday(): Monday=0)
 OPEN_FROM = dt.time(9, 0)
 OPEN_UNTIL = dt.time(16, 30)  # last slot ends here
 LUNCH = (dt.time(12, 0), dt.time(13, 0))
 MAX_DAYS_AHEAD = 90
-
-_PHONE_RE = re.compile(r"^\+?\d{8,15}$")
 
 
 class ServiceError(Exception):
@@ -50,8 +50,8 @@ def parse_time(value: str) -> dt.time:
 
 
 def normalise_phone(value: str) -> str:
-    cleaned = re.sub(r"[\s\-().]", "", value or "")
-    if not _PHONE_RE.match(cleaned):
+    cleaned = phone.normalise_phone(value)
+    if not phone.is_valid_phone(cleaned):
         raise invalid("patient_phone must contain 8 to 15 digits, optionally starting with +")
     return cleaned
 

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 import psycopg
 from pgvector.psycopg import register_vector
+
+log = logging.getLogger("voicedesk.db")
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "db" / "schema.sql"
 
@@ -36,3 +40,15 @@ def init_schema(dsn: str) -> None:
                 "ON CONFLICT (id) DO NOTHING",
                 (pid, name, specialty),
             )
+
+
+def init_schema_when_ready(dsn: str, attempts: int = 30, delay: float = 2.0) -> None:
+    """`init_schema`, retried while Postgres is still starting (docker compose, CI)."""
+    for attempt in range(1, attempts + 1):
+        try:
+            init_schema(dsn)
+            return
+        except psycopg.OperationalError as err:
+            log.warning("database not ready (%s), retry %d/%d", err, attempt, attempts)
+            time.sleep(delay)
+    raise SystemExit("database never became ready")

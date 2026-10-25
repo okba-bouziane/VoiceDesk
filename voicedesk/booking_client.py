@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import grpc
 
@@ -81,6 +82,8 @@ def _appt(a: pb.Appointment) -> AppointmentInfo:
 
 
 class GrpcBookingTools:
+    """`BookingTools` backed by the gRPC booking service."""
+
     def __init__(self, address: str, timeout: float = 5.0) -> None:
         self._channel = grpc.aio.insecure_channel(address)
         self._stub = pb_grpc.BookingServiceStub(self._channel)
@@ -89,7 +92,8 @@ class GrpcBookingTools:
     async def close(self) -> None:
         await self._channel.close()
 
-    async def _call(self, method, request):  # type: ignore[no-untyped-def]
+    async def _call(self, method: Callable[..., Awaitable[Any]], request: Any) -> Any:
+        """Invoke one RPC; gRPC failures become `ToolError` carrying the status name."""
         try:
             return await method(request, timeout=self._timeout)
         except grpc.aio.AioRpcError as err:

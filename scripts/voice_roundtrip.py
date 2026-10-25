@@ -16,14 +16,17 @@ import sys
 import tempfile
 import time
 import wave
+from typing import Any
 
 from langchain_core.messages import HumanMessage
 from livekit import rtc
+from livekit.agents import stt as lk_stt
+from livekit.agents import tts as lk_tts
 from livekit.agents.utils import http_context
 
 from agent.providers import build_stt, build_tts
 from voicedesk.config import get_settings
-from voicedesk.runtime import build_runtime
+from voicedesk.runtime import Runtime, build_runtime
 
 DEFAULT = [
     "Hello, what are your opening hours?",
@@ -32,16 +35,13 @@ DEFAULT = [
 ]
 
 
-async def synth(tts, text: str) -> tuple[rtc.AudioFrame, float]:
-    """Returns the audio and the time to first audio byte."""
+async def synth(tts: lk_tts.TTS, text: str) -> float:
+    """Time to the first audio frame of `text`."""
     start = time.perf_counter()
-    first = None
-    frames = []
-    async for ev in tts.synthesize(text):
-        if first is None:
-            first = time.perf_counter() - start
-        frames.append(ev.frame)
-    return rtc.combine_audio_frames(frames), first or 0.0
+    first: float | None = None
+    async for _ in tts.synthesize(text):
+        first = first or time.perf_counter() - start
+    return first or 0.0
 
 
 def caller_audio(text: str) -> rtc.AudioFrame:
@@ -57,54 +57,67 @@ def caller_audio(text: str) -> rtc.AudioFrame:
             return rtc.AudioFrame(data, w.getframerate(), 1, w.getnframes())
 
 
+async def transcribe(stt: lk_stt.STT, audio: rtc.AudioFrame) -> tuple[str, float]:
+    start = time.perf_counter()
+    event = await stt.recognize(audio)
+    return event.alternatives[0].text.strip(), time.perf_counter() - start
+
+
+async def run_graph(runtime: Runtime, turn: int, text: str) -> tuple[str, float, float]:
+    """Returns the reply, the time to its first token and the time to the whole reply."""
+    start = time.perf_counter()
+    first: float | None = None
+    chunks: list[str] = []
+    async for chunk in runtime.graph.astream(
+        {"messages": [HumanMessage(text, id=f"u{turn}")]},
+        {"configurable": {"thread_id": "rt"}},
+        stream_mode="custom",
+    ):
+        first = first or time.perf_counter() - start
+        chunks.append(chunk)
+    return "".join(chunks).strip(), first or 0.0, time.perf_counter() - start
+
+
+async def tts_first_audio(tts: lk_tts.TTS, reply: str) -> float | None:
+    """TTS of the first sentence mimics the streaming pipeline: speech starts after it."""
+    try:
+        return await synth(tts, reply.split(". ")[0][:200])
+    except Exception as err:  # noqa: BLE001 - any provider failure is reported, not invented
+        print("TTS unavailable:", str(err)[:120])
+        return None
+
+
+async def measure_turn(
+    runtime: Runtime, stt: lk_stt.STT, tts: lk_tts.TTS, turn: int, question: str
+) -> dict[str, Any]:
+    heard, stt_s = await transcribe(stt, caller_audio(question))
+    reply, first_token_s, llm_total_s = await run_graph(runtime, turn, heard)
+    tts_s = await tts_first_audio(tts, reply)
+    return {
+        "asked": question,
+        "heard": heard,
+        "reply": reply[:160],
+        "stt_s": round(stt_s, 3),
+        "llm_first_token_s": round(first_token_s, 3),
+        "llm_total_s": round(llm_total_s, 3),
+        "tts_first_audio_s": None if tts_s is None else round(tts_s, 3),
+        "stt_plus_llm_first_token_s": round(stt_s + first_token_s, 3),
+    }
+
+
 async def main(questions: list[str]) -> None:
-    s = get_settings()
-    stt, tts = build_stt(s), build_tts(s)
-    graph, tools, retriever = build_runtime(s)
-    rows = []
-    for i, q in enumerate(questions):
-        audio = caller_audio(q)
-        t0 = time.perf_counter()
-        ev = await stt.recognize(audio)
-        stt_s = time.perf_counter() - t0
-        heard = ev.alternatives[0].text.strip()
-
-        t1 = time.perf_counter()
-        first, reply = None, []
-        async for chunk in graph.astream(
-            {"messages": [HumanMessage(heard, id=f"u{i}")]},
-            {"configurable": {"thread_id": "rt"}},
-            stream_mode="custom",
-        ):
-            if first is None:
-                first = time.perf_counter() - t1
-            reply.append(chunk)
-        llm_total = time.perf_counter() - t1
-        text = "".join(reply).strip()
-
-        # TTS for the first sentence mimics the streaming pipeline: speech starts after it.
-        first_sentence = text.split(". ")[0][:200]
-        try:
-            _, tts_ttfb = await synth(tts, first_sentence)
-        except Exception as err:  # noqa: BLE001
-            tts_ttfb = None
-            print("TTS unavailable:", str(err)[:120])
-        row = {
-            "asked": q,
-            "heard": heard,
-            "reply": text[:160],
-            "stt_s": round(stt_s, 3),
-            "llm_first_token_s": round(first or 0, 3),
-            "llm_total_s": round(llm_total, 3),
-            "tts_first_audio_s": None if tts_ttfb is None else round(tts_ttfb, 3),
-            "stt_plus_llm_first_token_s": round(stt_s + (first or 0), 3),
-        }
-        rows.append(row)
-        print(json.dumps(row, indent=1))
-    pre = [r["stt_plus_llm_first_token_s"] for r in rows]
+    settings = get_settings()
+    stt, tts = build_stt(settings), build_tts(settings)
+    runtime = build_runtime(settings)
+    try:
+        rows = []
+        for turn, question in enumerate(questions):
+            rows.append(await measure_turn(runtime, stt, tts, turn, question))
+            print(json.dumps(rows[-1], indent=1))
+    finally:
+        await runtime.close()
+    pre = [row["stt_plus_llm_first_token_s"] for row in rows]
     print("median STT + LLM first token:", statistics.median(pre), "s over", len(pre), "turns")
-    await tools.close()
-    retriever.close()
 
 
 async def run(questions: list[str]) -> None:

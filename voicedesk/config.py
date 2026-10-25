@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import yaml
 from pydantic import Field
@@ -12,9 +13,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT / "config" / "voicedesk.yaml"
+CLINIC_TZ = ZoneInfo("Africa/Algiers")
 
 
 class Settings(BaseSettings):
+    """Every environment variable the project reads, in one place (also loaded from .env)."""
+
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
 
     llm_provider: str = "groq"
@@ -42,7 +46,22 @@ class Settings(BaseSettings):
 
     database_url: str = Field(default="postgresql://voicedesk:voicedesk@localhost:5434/voicedesk")
     booking_grpc_addr: str = "localhost:50051"
-    rag_backend: str = "postgres"  # "memory" for the hosted demo (no Postgres)
+    grpc_port: int = 50051  # port the booking service listens on
+    booking_store: Literal["postgres", "sqlite"] = "postgres"
+    sqlite_path: str = "/tmp/voicedesk.db"
+    rag_backend: Literal["postgres", "memory"] = "postgres"  # "memory": hosted demo, no Postgres
+
+    # Agent worker
+    agent_http_port: int = 8081
+    agent_idle_processes: int = 2
+    agent_metrics_port: int = 9464
+    prometheus_multiproc_dir: str = "/tmp/voicedesk-prom"
+
+    # Public-demo guards; 0 disables each one.
+    max_call_seconds: int = 0
+    demo_daily_session_cap: int = 0
+    demo_per_ip_hourly_cap: int = 0
+    demo_counter_path: str = "/tmp/voicedesk-calls.json"
 
     @property
     def effective_llm_key(self) -> str:

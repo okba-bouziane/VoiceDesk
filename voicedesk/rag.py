@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
 from fastembed import TextEmbedding
@@ -17,6 +17,21 @@ from .config import ROOT, load_config
 
 DOCS_DIR = ROOT / "data" / "clinic_docs"
 Mode = Literal["hybrid", "vector", "fts"]
+Row = tuple[Any, ...]
+
+
+@dataclass(frozen=True)
+class RagParams:
+    """Retrieval parameters from `config/voicedesk.yaml`."""
+
+    top_k: int
+    candidates: int  # how many rows each ranking contributes to the fusion
+    rrf_k: int
+    min_similarity: float
+
+    @classmethod
+    def from_config(cls) -> RagParams:
+        return cls(**load_config()["rag"])
 
 
 @dataclass(frozen=True)
@@ -27,6 +42,16 @@ class Hit:
     score: float
     similarity: float | None  # cosine similarity, None when the chunk had no vector hit
     fts_rank: int | None
+
+
+class SearchIndex(Protocol):
+    """What the graph and the eval need from a knowledge-base backend."""
+
+    min_similarity: float
+
+    def search(self, question: str, k: int | None = None, mode: Mode = "hybrid") -> list[Hit]: ...
+
+    def close(self) -> None: ...
 
 
 @lru_cache
@@ -95,34 +120,30 @@ class Retriever:
         self._pool = ConnectionPool(
             dsn, min_size=1, max_size=4, configure=register_vector, open=True
         )
-        cfg = load_config()["rag"]
-        self.top_k: int = cfg["top_k"]
-        self._candidates: int = cfg["candidates"]
-        self._rrf_k: int = cfg["rrf_k"]
-        self.min_similarity: float = cfg["min_similarity"]
+        self._params = RagParams.from_config()
+        self.min_similarity = self._params.min_similarity
 
     def close(self) -> None:
         self._pool.close()
 
     def search(self, question: str, k: int | None = None, mode: Mode = "hybrid") -> list[Hit]:
-        k = k or self.top_k
-        qvec = embed_query(question) if mode != "fts" else None
+        p = self._params
         with self._pool.connection() as conn:
-            vec_rows = (
-                conn.execute(_VECTOR_SQL, {"q": qvec, "n": self._candidates}).fetchall()
-                if mode != "fts"
-                else []
-            )
-            fts_rows = (
-                conn.execute(_FTS_SQL, {"text": question, "n": self._candidates}).fetchall()
-                if mode != "vector"
-                else []
-            )
-        return fuse(vec_rows, fts_rows, k, self._rrf_k)
+            vec_rows: list[Row] = []
+            fts_rows: list[Row] = []
+            if mode != "fts":
+                vec_rows = conn.execute(
+                    _VECTOR_SQL, {"q": embed_query(question), "n": p.candidates}
+                ).fetchall()
+            if mode != "vector":
+                fts_rows = conn.execute(_FTS_SQL, {"text": question, "n": p.candidates}).fetchall()
+        return fuse(vec_rows, fts_rows, k or p.top_k, p.rrf_k)
 
 
-def fuse(vec_rows: list, fts_rows: list, k: int, rrf_k: int = 60) -> list[Hit]:
-    """Reciprocal rank fusion of the vector and full-text rankings."""
+def fuse(vec_rows: list[Row], fts_rows: list[Row], k: int, rrf_k: int = 60) -> list[Hit]:
+    """Reciprocal rank fusion of the vector and full-text rankings.
+
+    Rows are (chunk id, source, heading, content, similarity or rank), best first."""
     info: dict[int, tuple[str, str, str]] = {}
     sim: dict[int, float] = {}
     fts_rank: dict[int, int] = {}
@@ -143,43 +164,14 @@ def fuse(vec_rows: list, fts_rows: list, k: int, rrf_k: int = 60) -> list[Hit]:
 
 
 def is_relevant(hits: list[Hit], min_similarity: float) -> bool:
-    """Grounding gate: enough vector similarity, or a full-text hit on a strong vector match."""
-    if not hits:
-        return False
-    best = max((h.similarity or 0.0) for h in hits)
-    return best >= min_similarity
+    """Grounding gate: answer only when the best vector match is similar enough."""
+    return max((h.similarity or 0.0 for h in hits), default=0.0) >= min_similarity
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
-_STOP = {
-    "the",
-    "a",
-    "an",
-    "is",
-    "are",
-    "do",
-    "you",
-    "your",
-    "i",
-    "my",
-    "can",
-    "to",
-    "of",
-    "and",
-    "or",
-    "in",
-    "on",
-    "at",
-    "for",
-    "it",
-    "what",
-    "how",
-    "me",
-    "we",
-    "be",
-    "if",
-    "there",
-}
+_STOP = frozenset(
+    "the a an is are do you your i my can to of and or in on at for it what how me we be if there".split()
+)
 
 
 def _terms(text: str) -> list[str]:
@@ -191,11 +183,8 @@ class MemoryRetriever:
     RRF fusion, but held in memory with a small BM25 ranking instead of Postgres + pgvector."""
 
     def __init__(self, docs_dir: Path = DOCS_DIR) -> None:
-        cfg = load_config()["rag"]
-        self.top_k: int = cfg["top_k"]
-        self._candidates: int = cfg["candidates"]
-        self._rrf_k: int = cfg["rrf_k"]
-        self.min_similarity: float = cfg["min_similarity"]
+        self._params = RagParams.from_config()
+        self.min_similarity = self._params.min_similarity
         self._chunks = [c for p in sorted(docs_dir.glob("*.md")) for c in chunk_markdown(p)]
         self._vectors = np.stack(embed_documents([f"{h}. {b}" for _, h, b in self._chunks]))
         self._vectors /= np.linalg.norm(self._vectors, axis=1, keepdims=True)
@@ -225,23 +214,23 @@ class MemoryRetriever:
         return scores
 
     def search(self, question: str, k: int | None = None, mode: Mode = "hybrid") -> list[Hit]:
-        k = k or self.top_k
-        vec_rows: list = []
-        fts_rows: list = []
+        p = self._params
+        vec_rows: list[Row] = []
+        fts_rows: list[Row] = []
         if mode != "fts":
             q = embed_query(question)
             sims = self._vectors @ (q / np.linalg.norm(q))
-            for i in np.argsort(-sims)[: self._candidates]:
-                src, head, body = self._chunks[i]
-                vec_rows.append((int(i), src, head, body, float(sims[i])))
+            vec_rows = [(int(i), *self._chunks[i], float(sims[i])) for i in self._top(sims)]
         if mode != "vector":
-            bm = self._bm25(_terms(question))
-            for i in np.argsort(-np.asarray(bm))[: self._candidates]:
-                if bm[i] > 0:
-                    src, head, body = self._chunks[i]
-                    fts_rows.append((int(i), src, head, body, bm[i]))
-        return fuse(vec_rows, fts_rows, k, self._rrf_k)
+            bm25 = np.asarray(self._bm25(_terms(question)))
+            fts_rows = [
+                (int(i), *self._chunks[i], float(bm25[i])) for i in self._top(bm25) if bm25[i] > 0
+            ]
+        return fuse(vec_rows, fts_rows, k or p.top_k, p.rrf_k)
+
+    def _top(self, scores: np.ndarray) -> np.ndarray:
+        return np.argsort(-scores)[: self._params.candidates]
 
 
-def build_retriever(dsn: str, backend: str = "postgres") -> Retriever | MemoryRetriever:
+def build_retriever(dsn: str, backend: str = "postgres") -> SearchIndex:
     return MemoryRetriever() if backend == "memory" else Retriever(dsn)

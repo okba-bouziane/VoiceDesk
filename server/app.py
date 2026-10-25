@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-import os
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
@@ -47,7 +48,7 @@ class TokenResponse(BaseModel):
 
 
 @app.middleware("http")
-async def timing(request: Request, call_next):  # type: ignore[no-untyped-def]
+async def timing(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     start = time.perf_counter()
     response = await call_next(request)
     route = request.scope.get("route")
@@ -57,7 +58,7 @@ async def timing(request: Request, call_next):  # type: ignore[no-untyped-def]
 
 
 limiter = SessionLimiter(
-    int(os.getenv("DEMO_DAILY_SESSION_CAP", "0")), int(os.getenv("DEMO_PER_IP_HOURLY_CAP", "0"))
+    get_settings().demo_daily_session_cap, get_settings().demo_per_ip_hourly_cap
 )
 
 
@@ -78,7 +79,14 @@ def client_config() -> dict[str, str]:
         "clinic": cfg["clinic"]["name"],
         "note": cfg["clinic"]["note"],
         "version": cfg["version"],
+        "max_call_seconds": str(get_settings().max_call_seconds),
     }
+
+
+def client_ip(request: Request) -> str:
+    """The caller's address, honouring the first X-Forwarded-For hop set by a reverse proxy."""
+    forwarded = request.headers.get("x-forwarded-for", "").split(",")[0].strip()
+    return forwarded or (request.client.host if request.client else "?")
 
 
 @app.post("/api/token", response_model=TokenResponse)
@@ -86,9 +94,7 @@ def issue_token(body: TokenRequest, request: Request) -> TokenResponse:
     s = get_settings()
     if not s.livekit_api_key or not s.livekit_api_secret:
         raise HTTPException(503, "LiveKit credentials are not configured")
-    forwarded = request.headers.get("x-forwarded-for", "")
-    ip = forwarded.split(",")[0].strip() or (request.client.host if request.client else "?")
-    refusal = limiter.check(ip)
+    refusal = limiter.check(client_ip(request))
     if refusal:
         raise HTTPException(429, refusal)
     room = f"clinic-{secrets.token_hex(4)}"
@@ -106,9 +112,18 @@ def issue_token(body: TokenRequest, request: Request) -> TokenResponse:
     )
 
 
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files that the browser re-checks on every load, so a new client is never stale."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
 
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+app.mount("/static", RevalidatedStaticFiles(directory=STATIC), name="static")

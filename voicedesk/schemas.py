@@ -9,6 +9,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .phone import is_valid_phone, normalise_phone
+
 
 class Intent(StrEnum):
     BOOK = "book_appointment"
@@ -28,13 +30,6 @@ class IntentResult(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
 
 
-_PHONE_RE = re.compile(r"^\+?\d{8,15}$")
-
-
-def normalise_phone(value: str) -> str:
-    return re.sub(r"[\s\-().]", "", value)
-
-
 class SlotUpdate(BaseModel):
     """What the caller said in one turn. Every field is optional and validated."""
 
@@ -52,7 +47,7 @@ class SlotUpdate(BaseModel):
         if v is None:
             return None
         v = normalise_phone(v)
-        if not _PHONE_RE.match(v):
+        if not is_valid_phone(v):
             raise ValueError("phone must have 8 to 15 digits")
         return v
 

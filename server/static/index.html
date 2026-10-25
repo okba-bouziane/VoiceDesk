@@ -2,8 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
 <title>VoiceDesk</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230f6b57'/%3E%3Cpath d='M9 13v6M14 9v14M19 12v8M24 14v4' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -13,36 +15,42 @@
       <h1>VoiceDesk</h1>
       <p id="clinic" class="muted">Voice receptionist demo</p>
     </div>
-    <span id="state" class="pill" data-state="offline">offline</span>
+    <span id="state" class="pill" data-state="offline" role="status">offline</span>
   </header>
 
   <p class="notice">Sample data only. This is a fictional clinic; nothing you say is a real booking.</p>
+  <p id="banner" class="banner" role="alert" hidden></p>
 
-  <section class="controls">
-    <button id="connect">Start call</button>
-    <button id="mute" class="ghost" disabled>Mute mic</button>
+  <section class="controls" aria-label="Call controls">
+    <button id="connect" type="button">Start call</button>
+    <button id="mute" type="button" class="ghost" aria-pressed="false" disabled>Mute mic</button>
+    <span id="timer" class="timer muted" hidden></span>
   </section>
 
-  <section class="panel">
-    <h2>Live transcript</h2>
-    <div id="transcript" aria-live="polite"><p class="muted empty">The conversation will appear here.</p></div>
+  <section class="panel" aria-labelledby="transcript-title">
+    <h2 id="transcript-title">Live transcript</h2>
+    <div id="transcript" role="log" aria-live="polite" tabindex="0" aria-labelledby="transcript-title">
+      <p class="muted empty">The conversation will appear here.</p>
+    </div>
     <form id="chat" autocomplete="off">
-      <input id="text" placeholder="Or type a message instead of speaking" disabled>
-      <button class="ghost" disabled>Send</button>
+      <label class="sr-only" for="text">Message</label>
+      <input id="text" placeholder="Or type a message" enterkeyhint="send" disabled>
+      <button type="submit" class="ghost" disabled>Send</button>
     </form>
   </section>
 
-  <section class="panel">
-    <h2>Last turn latency</h2>
+  <section class="panel" aria-labelledby="latency-title">
+    <h2 id="latency-title">Last turn latency</h2>
     <table id="latency">
-      <tr><td>Endpointing + transcript</td><td data-k="eou_delay">-</td></tr>
-      <tr><td>LLM first token (LangGraph)</td><td data-k="llm_ttft">-</td></tr>
-      <tr><td>TTS first audio</td><td data-k="tts_ttfb">-</td></tr>
-      <tr class="total"><td>End to end</td><td data-k="end_to_end">-</td></tr>
+      <tr><th scope="row">Endpointing + transcript</th><td data-k="eou_delay">-</td></tr>
+      <tr><th scope="row">LLM first token (LangGraph)</th><td data-k="llm_ttft">-</td></tr>
+      <tr><th scope="row">TTS first audio</th><td data-k="tts_ttfb">-</td></tr>
+      <tr class="total"><th scope="row">End to end</th><td data-k="end_to_end">-</td></tr>
     </table>
     <p class="muted small">Prompt version <span id="version">-</span>. Seconds, measured by the agent.</p>
   </section>
 </main>
+<noscript><p class="banner">This demo needs JavaScript.</p></noscript>
 <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.22.4/dist/livekit-client.umd.min.js"></script>
 <script src="/static/app.js"></script>
 </body>

@@ -9,25 +9,25 @@ import functools
 import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, TypedDict
-from zoneinfo import ZoneInfo
+from typing import Annotated, Any, TypedDict, TypeVar, cast
 
 from langchain_core.messages import AnyMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
+from langgraph.graph.state import CompiledStateGraph
 
 from .booking_client import AppointmentInfo, BookingTools, SlotInfo, ToolError
-from .config import prompt
+from .config import CLINIC_TZ, prompt
 from .llm import LLMClient, StructuredOutputError, structured_call
 from .rag import Hit, is_relevant
-from .schemas import AgentAction, BookingSlots, Intent, IntentResult, SlotUpdate
+from .schemas import ActionKind, AgentAction, BookingSlots, Intent, IntentResult, SlotUpdate
 
 log = logging.getLogger("voicedesk.graph")
 
-CLINIC_TZ = ZoneInfo("Africa/Algiers")
 Search = Callable[[str], Awaitable[list[Hit]]]
+NodeFn = TypeVar("NodeFn", bound=Callable[..., Awaitable[dict[str, Any]]])
 SPECIALTIES = ["general medicine", "dentistry", "pediatrics", "dermatology"]
 
 
@@ -68,17 +68,16 @@ def say_time(t: dt.time) -> str:
     return f"{h}:{t.minute:02d} {'AM' if t.hour < 12 else 'PM'}"
 
 
-def _iso(d: str, t: str) -> tuple[dt.date, dt.time]:
-    return dt.date.fromisoformat(d), dt.time.fromisoformat(t)
+def _parse(date: str, start_time: str) -> tuple[dt.date, dt.time]:
+    return dt.date.fromisoformat(date), dt.time.fromisoformat(start_time)
 
 
-def say_slot(s: SlotInfo) -> str:
-    d, t = _iso(s.date, s.start_time)
-    return f"{say_date(d)} at {say_time(t)} with {s.provider_name}"
+def say_slot_time(s: SlotInfo) -> str:
+    return say_time(_parse(s.date, s.start_time)[1])
 
 
 def say_appt(a: AppointmentInfo) -> str:
-    d, t = _iso(a.date, a.start_time)
+    d, t = _parse(a.date, a.start_time)
     return f"{a.specialty} on {say_date(d)} at {say_time(t)} with {a.provider_name}"
 
 
@@ -97,9 +96,9 @@ def _emit(text: str) -> None:
     get_stream_writer()(text)
 
 
-def _act(kind: str, speech: str, **kw: Any) -> dict[str, Any]:
+def _act(kind: ActionKind, speech: str, **kw: Any) -> dict[str, Any]:
     """Validate the final action of the turn and speak it."""
-    action = AgentAction(kind=kind, speech=speech, **kw)  # type: ignore[arg-type]
+    action = AgentAction(kind=kind, speech=speech, **kw)
     _emit(action.speech)
     log.info("action %s", action.model_dump(exclude={"speech"}))
     return action.model_dump(mode="json")
@@ -131,9 +130,7 @@ def decide(state: State, intent: Intent) -> str:
         if intent is Intent.DECLINE:
             return "decline_flow"
         return "book" if awaiting == "booking_confirm" else "do_cancel"
-    if intent is Intent.CANCEL:
-        return "manage"
-    if intent is Intent.LIST:
+    if intent in (Intent.CANCEL, Intent.LIST):
         return "manage"
     if intent in (Intent.BOOK, Intent.CHECK):
         return "booking"
@@ -147,10 +144,62 @@ def decide(state: State, intent: Intent) -> str:
     return "smalltalk"
 
 
-def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
-    llm, tools = deps.llm, deps.tools
+# ---- nodes -----------------------------------------------------------------------------------
+SLOT_QUESTIONS = {
+    "specialty": "Which kind of doctor would you like to see: general medicine, "
+    "dentistry, pediatrics or dermatology?",
+    "date": "Which day would you like to come?",
+    "time": "What time would suit you?",
+    "patient_name": "May I have the patient's full name?",
+    "patient_phone": "And a phone number to reach you?",
+}
+# Nodes reached after routing; each one ends the turn.
+ACTION_NODES = (
+    "booking",
+    "book",
+    "manage",
+    "do_cancel",
+    "decline_flow",
+    "faq",
+    "smalltalk",
+    "handoff",
+)
+OUTAGE_APOLOGY = (
+    "Sorry, I am having a technical problem. Please try again in a moment, "
+    "or say staff and I will connect you with a person."
+)
+FLOW_ENDED: dict[str, Any] = {"flow": "none", "awaiting": "none"}
 
-    async def route(state: State) -> dict[str, Any]:
+
+def _dump(slots: BookingSlots) -> dict[str, Any]:
+    return slots.model_dump(mode="json")
+
+
+def _safe(node: NodeFn) -> NodeFn:
+    """A provider outage must degrade into an apology, never kill the voice session."""
+
+    @functools.wraps(node)
+    async def wrapper(self: Any, state: State) -> dict[str, Any]:
+        try:
+            return await node(self, state)
+        except Exception:
+            log.exception("node %s failed", node.__name__)
+            return {"intent": Intent.OTHER.value, "action": _act("error", OUTAGE_APOLOGY)}
+
+    return cast(NodeFn, wrapper)
+
+
+class ConversationNodes:
+    """The graph nodes. Each takes the state and returns the patch to apply to it."""
+
+    def __init__(self, deps: Deps) -> None:
+        self._deps = deps
+        self._llm = deps.llm
+        self._tools = deps.tools
+
+    # ---- routing
+    @_safe
+    async def route(self, state: State) -> dict[str, Any]:
         text = last_user_text(state)
         if not text.strip():
             return {"intent": Intent.OTHER.value, "action": {}}
@@ -160,8 +209,8 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
             awaiting=state.get("awaiting", "none") != "none",
         )
         try:
-            res = await structured_call(
-                llm,
+            result = await structured_call(
+                self._llm,
                 "route",
                 IntentResult,
                 [
@@ -169,18 +218,19 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
                     {"role": "user", "content": transcript(state, 4)},
                 ],
             )
-            intent = res.intent
+            intent = result.intent
         except StructuredOutputError:
             intent = Intent.OTHER
         return {"intent": intent.value, "action": {}}
 
+    @staticmethod
     def after_route(state: State) -> str:
         if not last_user_text(state).strip() or state.get("action", {}).get("kind") == "error":
             return END
         return decide(state, Intent(state["intent"]))
 
-    async def extract(state: State, known: dict[str, Any]) -> SlotUpdate:
-        today = deps.today()
+    async def _extract(self, state: State, known: dict[str, Any]) -> SlotUpdate:
+        today = self._deps.today()
         system = prompt(
             "extract_booking",
             today=today.isoformat(),
@@ -191,7 +241,7 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
         )
         try:
             return await structured_call(
-                llm,
+                self._llm,
                 "extract",
                 SlotUpdate,
                 [
@@ -203,65 +253,35 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
             return SlotUpdate()
 
     # ---- booking flow
-    async def booking(state: State) -> dict[str, Any]:
-        slots = BookingSlots(**(state.get("slots") or {}))
-        known = {k: str(v) for k, v in slots.model_dump().items() if v is not None}
-        update = await extract(state, known)
+    def _sanitise(self, update: SlotUpdate) -> str:
+        """Drop unusable specialty or past dates from the update; returns a note to speak."""
         note = ""
         if update.specialty:
-            norm = update.specialty.lower()
-            match = next((s for s in SPECIALTIES if s in norm or norm in s), None)
+            wanted = update.specialty.lower()
+            match = next((s for s in SPECIALTIES if s in wanted or wanted in s), None)
+            update.specialty = match
             if match is None:
-                update.specialty = None
                 note = f"We offer {', '.join(SPECIALTIES[:-1])} and {SPECIALTIES[-1]}. "
-            else:
-                update.specialty = match
-        today = deps.today()
-        if update.date and update.date < today:
+        if update.date and update.date < self._deps.today():
             update.date = None
             note = "That date has already passed. "
+        return note
+
+    @_safe
+    async def booking(self, state: State) -> dict[str, Any]:
+        slots = BookingSlots(**(state.get("slots") or {}))
+        known = {k: str(v) for k, v in slots.model_dump().items() if v is not None}
+        update = await self._extract(state, known)
+        note = self._sanitise(update)
         slots = slots.merge(update)
         patch: dict[str, Any] = {"flow": "booking", "awaiting": "none"}
 
         if slots.specialty and slots.date and slots.time is None:
-            try:
-                free = await tools.check_availability(slots.specialty, slots.date.isoformat(), 3)
-            except ToolError as err:
-                slots = slots.model_copy(update={"date": None})
-                patch["slots"] = slots.model_dump(mode="json")
-                patch["action"] = _act(
-                    "ask_slot", f"{err.message}. Which other day would suit you?"
-                )
-                return patch
-            if not free:
-                slots = slots.model_copy(update={"date": None})
-                patch["slots"] = slots.model_dump(mode="json")
-                patch["action"] = _act(
-                    "ask_slot",
-                    f"{note}There is nothing free that day. Which other day would suit you?",
-                )
-                return patch
-            assert slots.date
-            patch["slots"] = slots.model_dump(mode="json")
-            times = ", ".join(say_time(_iso(s.date, s.start_time)[1]) for s in free)
-            patch["action"] = _act(
-                "offer_slots",
-                f"{note}On {say_date(slots.date)} I have {times}. Which time do you prefer?",
-            )
-            return patch
+            return patch | await self._offer_times(slots, note)
 
-        patch["slots"] = slots.model_dump(mode="json")
-        missing = slots.missing()
-        if missing:
-            questions = {
-                "specialty": "Which kind of doctor would you like to see: general medicine, "
-                "dentistry, pediatrics or dermatology?",
-                "date": "Which day would you like to come?",
-                "time": "What time would suit you?",
-                "patient_name": "May I have the patient's full name?",
-                "patient_phone": "And a phone number to reach you?",
-            }
-            patch["action"] = _act("ask_slot", note + questions[missing[0]])
+        patch["slots"] = _dump(slots)
+        if missing := slots.missing():
+            patch["action"] = _act("ask_slot", note + SLOT_QUESTIONS[missing[0]])
             return patch
 
         assert slots.date and slots.time and slots.specialty
@@ -274,11 +294,36 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
         )
         return patch
 
-    async def book(state: State) -> dict[str, Any]:
+    async def _offer_times(self, slots: BookingSlots, note: str) -> dict[str, Any]:
+        """Specialty and date are known: offer free times, or ask for another day."""
+        assert slots.specialty and slots.date
+        day = slots.date
+        try:
+            free = await self._tools.check_availability(slots.specialty, day.isoformat(), 3)
+            problem = "" if free else f"{note}There is nothing free that day. "
+        except ToolError as err:
+            free, problem = [], f"{err.message}. "
+        if problem:
+            slots = slots.model_copy(update={"date": None})
+            return {
+                "slots": _dump(slots),
+                "action": _act("ask_slot", f"{problem}Which other day would suit you?"),
+            }
+        times = ", ".join(say_slot_time(s) for s in free)
+        return {
+            "slots": _dump(slots),
+            "action": _act(
+                "offer_slots",
+                f"{note}On {say_date(day)} I have {times}. Which time do you prefer?",
+            ),
+        }
+
+    @_safe
+    async def book(self, state: State) -> dict[str, Any]:
         s = BookingSlots(**state["slots"])
         assert s.date and s.time and s.specialty and s.patient_name and s.patient_phone
         try:
-            appt = await tools.book(
+            appt = await self._tools.book(
                 specialty=s.specialty,
                 date=s.date.isoformat(),
                 start_time=s.time.strftime("%H:%M"),
@@ -287,21 +332,27 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
                 reason=s.reason or "",
             )
         except ToolError as err:
-            if err.code in ("ALREADY_EXISTS", "INVALID_ARGUMENT"):
-                kept = s.model_copy(update={"time": None})
-                if err.code == "INVALID_ARGUMENT":
-                    kept = kept.model_copy(update={"date": None})
-                return {
-                    "awaiting": "none",
-                    "slots": kept.model_dump(mode="json"),
-                    "action": _act(
-                        "ask_slot",
-                        f"Sorry, {_friendly(err)}. Please choose another "
-                        f"{'day' if err.code == 'INVALID_ARGUMENT' else 'time'}.",
-                    ),
-                }
+            return self._booking_failed(s, err)
+        return {
+            **FLOW_ENDED,
+            "slots": {},
+            "action": _act(
+                "booked",
+                f"Done. Your {say_appt(appt)} is booked. Is there anything else I can help with?",
+                appointment_id=appt.appointment_id,
+            ),
+        }
+
+    @staticmethod
+    def _booking_failed(slots: BookingSlots, err: ToolError) -> dict[str, Any]:
+        """A taken slot or a closed day only invalidates that slot; anything else ends the flow."""
+        if err.code == "ALREADY_EXISTS":
+            kept, ask_for = slots.model_copy(update={"time": None}), "time"
+        elif err.code == "INVALID_ARGUMENT":
+            kept, ask_for = slots.model_copy(update={"time": None, "date": None}), "day"
+        else:
             return {
-                "awaiting": "none",
+                **FLOW_ENDED,
                 "flow": "none",
                 "slots": {},
                 "action": _act(
@@ -311,27 +362,25 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
                 ),
             }
         return {
-            "flow": "none",
             "awaiting": "none",
-            "slots": {},
+            "slots": _dump(kept),
             "action": _act(
-                "booked",
-                f"Done. Your {say_appt(appt)} is booked. Is there anything else I can help with?",
-                appointment_id=appt.appointment_id,
+                "ask_slot", f"Sorry, {_friendly(err)}. Please choose another {ask_for}."
             ),
         }
 
     # ---- cancel / list flow
-    async def manage(state: State) -> dict[str, Any]:
+    @_safe
+    async def manage(self, state: State) -> dict[str, Any]:
         intent = Intent(state["intent"])
-        flow = (
-            "cancel"
-            if intent is Intent.CANCEL
-            else "list"
-            if intent is Intent.LIST
-            else state.get("flow", "cancel")
-        )
-        update = await extract(state, {"phone": state.get("phone")} if state.get("phone") else {})
+        if intent is Intent.CANCEL:
+            flow = "cancel"
+        elif intent is Intent.LIST:
+            flow = "list"
+        else:
+            flow = state.get("flow", "cancel")
+        known = {"phone": state["phone"]} if state.get("phone") else {}
+        update = await self._extract(state, known)
         phone = update.patient_phone or state.get("phone")
         patch: dict[str, Any] = {"flow": flow, "awaiting": "none", "phone": phone}
         if not phone:
@@ -342,68 +391,67 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
             )
             return patch
         try:
-            appts = await tools.list_appointments(phone)
+            appts = await self._tools.list_appointments(phone)
         except ToolError as err:
             patch["action"] = _act("error", f"{err.message}. Could you repeat the phone number?")
             patch["phone"] = None
             return patch
+
         if not appts:
-            return {
-                "flow": "none",
-                "phone": None,
-                "action": _act(
-                    "appointments", "I don't see any upcoming appointments under that number."
-                ),
-            }
-        if flow == "list":
+            speech = "I don't see any upcoming appointments under that number."
+        elif flow == "list":
+            plural = "s" if len(appts) > 1 else ""
             listing = "; ".join(say_appt(a) for a in appts)
-            return {
-                "flow": "none",
-                "phone": None,
-                "action": _act(
-                    "appointments",
-                    f"You have {len(appts)} appointment{'s' if len(appts) > 1 else ''}: {listing}.",
-                ),
-            }
+            speech = f"You have {len(appts)} appointment{plural}: {listing}."
+        else:
+            return self._propose_cancellation(patch, appts, update, phone)
+        return {"flow": "none", "phone": None, "action": _act("appointments", speech)}
+
+    @staticmethod
+    def _propose_cancellation(
+        patch: dict[str, Any], appts: list[AppointmentInfo], update: SlotUpdate, phone: str
+    ) -> dict[str, Any]:
         chosen = appts
         if update.appointment_date:
-            chosen = [a for a in appts if a.date == update.appointment_date.isoformat()] or appts
+            wanted = update.appointment_date.isoformat()
+            chosen = [a for a in appts if a.date == wanted] or appts
         if len(chosen) > 1:
             listing = " or ".join(say_appt(a) for a in chosen)
             patch["action"] = _act(
                 "ask_slot", f"You have several: {listing}. Which one should I cancel?"
             )
             return patch
-        a = chosen[0]
+        target = chosen[0]
         patch["awaiting"] = "cancel_confirm"
-        patch["target"] = {"id": a.appointment_id, "phone": phone}
+        patch["target"] = {"id": target.appointment_id, "phone": phone}
         patch["action"] = _act(
             "cancel_confirm",
-            f"I found your {say_appt(a)}. Do you want me to cancel it?",
-            appointment_id=a.appointment_id,
+            f"I found your {say_appt(target)}. Do you want me to cancel it?",
+            appointment_id=target.appointment_id,
         )
         return patch
 
-    async def do_cancel(state: State) -> dict[str, Any]:
-        t = state["target"] or {}
-        reset = {"flow": "none", "awaiting": "none", "phone": None, "target": None}
+    @_safe
+    async def do_cancel(self, state: State) -> dict[str, Any]:
+        target = state["target"] or {}
+        reset = {**FLOW_ENDED, "phone": None, "target": None}
         try:
-            a = await tools.cancel(t["id"], t["phone"])
+            appt = await self._tools.cancel(target["id"], target["phone"])
         except ToolError as err:
             return {**reset, "action": _act("error", f"I could not cancel it: {err.message}.")}
         return {
             **reset,
             "action": _act(
                 "cancelled",
-                f"Your {say_appt(a)} is cancelled. Anything else I can do for you?",
-                appointment_id=a.appointment_id,
+                f"Your {say_appt(appt)} is cancelled. Anything else I can do for you?",
+                appointment_id=appt.appointment_id,
             ),
         }
 
-    async def decline_flow(state: State) -> dict[str, Any]:
+    @_safe
+    async def decline_flow(self, state: State) -> dict[str, Any]:
         return {
-            "flow": "none",
-            "awaiting": "none",
+            **FLOW_ENDED,
             "slots": {},
             "phone": None,
             "target": None,
@@ -412,26 +460,22 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
             ),
         }
 
-    # ---- FAQ with RAG
-    async def stream_llm(task: str, system: str, state: State) -> str:
-        msgs = [{"role": "system", "content": system}]
-        for m in state.get("messages", [])[-deps.history :]:
-            msgs.append(
-                {
-                    "role": "user" if isinstance(m, HumanMessage) else "assistant",
-                    "content": str(m.content),
-                }
-            )
+    # ---- free-form replies (streamed token by token)
+    async def _stream_reply(self, task: str, system: str, state: State) -> str:
+        messages = [{"role": "system", "content": system}]
+        for m in state.get("messages", [])[-self._deps.history :]:
+            role = "user" if isinstance(m, HumanMessage) else "assistant"
+            messages.append({"role": role, "content": str(m.content)})
         parts: list[str] = []
-        async for token in llm.stream(task, msgs):
+        async for token in self._llm.stream(task, messages):
             parts.append(token)
             _emit(token)
         return "".join(parts)
 
-    async def faq(state: State) -> dict[str, Any]:
-        question = last_user_text(state)
-        hits = await deps.search(question)
-        if not is_relevant(hits, deps.min_similarity):
+    @_safe
+    async def faq(self, state: State) -> dict[str, Any]:
+        hits = await self._deps.search(last_user_text(state))
+        if not is_relevant(hits, self._deps.min_similarity):
             return {
                 "action": _act(
                     "answer",
@@ -439,7 +483,7 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
                 )
             }
         context = "\n\n".join(f"[{h.source}] {h.heading}: {h.content}" for h in hits)
-        text = await stream_llm("answer", prompt("faq_answer", context=context), state)
+        text = await self._stream_reply("answer", prompt("faq_answer", context=context), state)
         action = AgentAction(
             kind="answer",
             speech=text or "Sorry, I have no answer.",
@@ -448,15 +492,16 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
         )
         return {"action": action.model_dump(mode="json")}
 
-    async def smalltalk(state: State) -> dict[str, Any]:
-        text = await stream_llm("smalltalk", prompt("smalltalk"), state)
+    @_safe
+    async def smalltalk(self, state: State) -> dict[str, Any]:
+        text = await self._stream_reply("smalltalk", prompt("smalltalk"), state)
         action = AgentAction(kind="greeting", speech=text or "Hello, how can I help?")
         return {"action": action.model_dump(mode="json")}
 
-    async def handoff(state: State) -> dict[str, Any]:
+    @_safe
+    async def handoff(self, state: State) -> dict[str, Any]:
         return {
-            "flow": "none",
-            "awaiting": "none",
+            **FLOW_ENDED,
             "action": _act(
                 "handoff",
                 "Of course. I am passing you to a member of our staff now. "
@@ -465,64 +510,15 @@ def build_graph(deps: Deps):  # type: ignore[no-untyped-def]
             ),
         }
 
-    def safe(fn):  # type: ignore[no-untyped-def]
-        """A provider outage must degrade into an apology, never kill the voice session."""
 
-        @functools.wraps(fn)
-        async def wrapper(state: State) -> dict[str, Any]:
-            try:
-                return await fn(state)  # type: ignore[no-any-return]
-            except Exception:
-                log.exception("node %s failed", fn.__name__)
-                return {
-                    "intent": Intent.OTHER.value,
-                    "action": _act(
-                        "error",
-                        "Sorry, I am having a technical problem. Please try again in a moment, "
-                        "or say staff and I will connect you with a person.",
-                    ),
-                }
-
-        return wrapper
-
-    g = StateGraph(State)
-    for name, fn in [
-        ("route", route),
-        ("booking", booking),
-        ("book", book),
-        ("manage", manage),
-        ("do_cancel", do_cancel),
-        ("decline_flow", decline_flow),
-        ("faq", faq),
-        ("smalltalk", smalltalk),
-        ("handoff", handoff),
-    ]:
-        g.add_node(name, safe(fn))
-    g.add_edge(START, "route")
-    g.add_conditional_edges(
-        "route",
-        after_route,
-        [
-            "booking",
-            "book",
-            "manage",
-            "do_cancel",
-            "decline_flow",
-            "faq",
-            "smalltalk",
-            "handoff",
-            END,
-        ],
-    )
-    for name in (
-        "booking",
-        "book",
-        "manage",
-        "do_cancel",
-        "decline_flow",
-        "faq",
-        "smalltalk",
-        "handoff",
-    ):
-        g.add_edge(name, END)
-    return g.compile(checkpointer=MemorySaver())
+def build_graph(deps: Deps) -> CompiledStateGraph:
+    """Compile the conversation graph; state is checkpointed per thread (one thread per room)."""
+    nodes = ConversationNodes(deps)
+    graph = StateGraph(State)
+    graph.add_node("route", nodes.route)
+    for name in ACTION_NODES:
+        graph.add_node(name, getattr(nodes, name))
+        graph.add_edge(name, END)
+    graph.add_edge(START, "route")
+    graph.add_conditional_edges("route", nodes.after_route, [*ACTION_NODES, END])
+    return graph.compile(checkpointer=MemorySaver())

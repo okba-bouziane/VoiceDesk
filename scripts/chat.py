@@ -9,40 +9,49 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from collections.abc import Iterator
 
 from langchain_core.messages import HumanMessage
 
-from voicedesk.runtime import build_runtime
+from voicedesk.runtime import Runtime, build_runtime
 
 
-async def main(turns: list[str]) -> None:
-    graph, tools, retriever = build_runtime()
-    cfg = {"configurable": {"thread_id": "cli"}}
-    interactive = not turns
-    while True:
-        if interactive:
-            try:
-                text = input("you> ")
-            except EOFError:
-                break
-        elif turns:
-            text = turns.pop(0)
+def caller_turns(scripted: list[str]) -> Iterator[str]:
+    """Scripted turns when given, otherwise lines typed until EOF."""
+    if scripted:
+        for text in scripted:
             print(f"you> {text}")
-        else:
-            break
-        start = time.perf_counter()
-        first = None
-        print("bot> ", end="", flush=True)
-        async for chunk in graph.astream(
-            {"messages": [HumanMessage(text)]}, cfg, stream_mode="custom"
-        ):
-            if first is None:
-                first = time.perf_counter() - start
-            print(chunk, end="", flush=True)
-        total = time.perf_counter() - start
-        print(f"\n     [first token {first or 0:.2f}s, total {total:.2f}s]")
-    await tools.close()
-    retriever.close()
+            yield text
+        return
+    while True:
+        try:
+            yield input("you> ")
+        except EOFError:
+            return
+
+
+async def say(runtime: Runtime, text: str) -> None:
+    start = time.perf_counter()
+    first_token: float | None = None
+    print("bot> ", end="", flush=True)
+    async for chunk in runtime.graph.astream(
+        {"messages": [HumanMessage(text)]},
+        {"configurable": {"thread_id": "cli"}},
+        stream_mode="custom",
+    ):
+        first_token = first_token or time.perf_counter() - start
+        print(chunk, end="", flush=True)
+    total = time.perf_counter() - start
+    print(f"\n     [first token {first_token or 0:.2f}s, total {total:.2f}s]")
+
+
+async def main(scripted: list[str]) -> None:
+    runtime = build_runtime()
+    try:
+        for text in caller_turns(scripted):
+            await say(runtime, text)
+    finally:
+        await runtime.close()
 
 
 if __name__ == "__main__":

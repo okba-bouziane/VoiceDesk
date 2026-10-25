@@ -2,26 +2,18 @@
 
 from __future__ import annotations
 
-import time
+import logging
 
 from voicedesk.config import get_settings
-from voicedesk.db import init_schema
+from voicedesk.db import init_schema_when_ready
 from voicedesk.rag import ingest_documents
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     dsn = get_settings().database_url
-    for attempt in range(20):
-        try:
-            init_schema(dsn)
-            break
-        except Exception as err:  # noqa: BLE001
-            print(f"database not ready ({err}); retry {attempt + 1}")
-            time.sleep(2)
-    else:
-        raise SystemExit("database never became ready")
-    n = ingest_documents(dsn)
-    print(f"indexed {n} chunks from data/clinic_docs")
+    init_schema_when_ready(dsn, attempts=20)
+    print(f"indexed {ingest_documents(dsn)} chunks from data/clinic_docs")
 
 
 if __name__ == "__main__":
