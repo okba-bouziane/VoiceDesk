@@ -76,6 +76,19 @@ def say_slot_time(s: SlotInfo) -> str:
     return say_time(_parse(s.date, s.start_time)[1])
 
 
+OFFERED_TIMES = 3
+
+
+def distinct_times(free: list[SlotInfo], n: int = OFFERED_TIMES) -> list[str]:
+    """The first n start times, each said once even when several doctors are free then."""
+    times: list[str] = []
+    for slot in free:
+        spoken = say_slot_time(slot)
+        if spoken not in times:
+            times.append(spoken)
+    return times[:n]
+
+
 def say_appt(a: AppointmentInfo) -> str:
     d, t = _parse(a.date, a.start_time)
     return f"{a.specialty} on {say_date(d)} at {say_time(t)} with {a.provider_name}"
@@ -299,7 +312,10 @@ class ConversationNodes:
         assert slots.specialty and slots.date
         day = slots.date
         try:
-            free = await self._tools.check_availability(slots.specialty, day.isoformat(), 3)
+            # Ask for extra slots: several doctors can share a start time, and each time is said once.
+            free = await self._tools.check_availability(
+                slots.specialty, day.isoformat(), OFFERED_TIMES * 4
+            )
             problem = "" if free else f"{note}There is nothing free that day. "
         except ToolError as err:
             free, problem = [], f"{err.message}. "
@@ -309,7 +325,7 @@ class ConversationNodes:
                 "slots": _dump(slots),
                 "action": _act("ask_slot", f"{problem}Which other day would suit you?"),
             }
-        times = ", ".join(say_slot_time(s) for s in free)
+        times = ", ".join(distinct_times(free))
         return {
             "slots": _dump(slots),
             "action": _act(

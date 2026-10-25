@@ -146,7 +146,7 @@ Hybrid recall@1 is 0.875. The "answer or abstain" gate classifies 35 of 38 quest
 
 The sets are small, so treat these as smoke-level numbers, not benchmarks. An earlier 20b run resolved "next Sunday" to the wrong date, which is why the extraction prompt now carries a 14-day calendar.
 
-**Tests** (`pytest`): 105 tests. The ones that need Postgres with pgvector skip when it is not reachable (CI runs them against a pgvector service), and the 3 live ones need an LLM key.
+**Tests** (`pytest`): 106 tests. The ones that need Postgres with pgvector skip when it is not reachable (CI runs them against a pgvector service), and the 3 live ones need an LLM key.
 
 | File | What it covers |
 |---|---|

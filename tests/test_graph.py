@@ -166,3 +166,18 @@ async def test_provider_outage_becomes_an_apology_and_the_session_survives():
     r = await c.say("book a dentist")
     assert "technical problem" in r
     assert "technical problem" in await c.say("hello?")  # next turn still works, no crash
+
+
+def test_offered_times_are_distinct_when_doctors_share_a_slot():
+    from voicedesk.booking_client import SlotInfo
+    from voicedesk.graph import distinct_times
+
+    free = [
+        SlotInfo("dr-a", "Dr. A", "general medicine", "2026-10-26", "09:00"),
+        SlotInfo("dr-b", "Dr. B", "general medicine", "2026-10-26", "09:00"),
+        SlotInfo("dr-a", "Dr. A", "general medicine", "2026-10-26", "09:30"),
+        SlotInfo("dr-b", "Dr. B", "general medicine", "2026-10-26", "09:30"),
+        SlotInfo("dr-a", "Dr. A", "general medicine", "2026-10-26", "10:00"),
+        SlotInfo("dr-a", "Dr. A", "general medicine", "2026-10-26", "10:30"),
+    ]
+    assert distinct_times(free) == ["9:00 AM", "9:30 AM", "10:00 AM"]
