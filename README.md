@@ -1,5 +1,7 @@
 # VoiceDesk
 
+[![CI](https://github.com/okba-bouziane/VoiceDesk/actions/workflows/ci.yml/badge.svg)](https://github.com/okba-bouziane/VoiceDesk/actions/workflows/ci.yml)
+
 A voice receptionist for a fictional clinic. A caller talks to it in the browser; it books, lists and cancels appointments, answers questions about the clinic from a knowledge base, and hands over to a human when asked or when the situation sounds urgent.
 
 > **All clinic data is sample data.** The clinic, doctors, prices, policies and phone numbers are invented. Nothing here is medical advice.
