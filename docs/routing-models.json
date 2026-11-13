@@ -1,0 +1,35 @@
+{
+  "date": "2026-11-13",
+  "prompt_version": "2026.11.1",
+  "set": "data/eval/live_set.json",
+  "results": [
+    {
+      "model": "openai/gpt-oss-20b",
+      "intent_accuracy": 0.9285714285714286,
+      "intent_examples": 28,
+      "slot_field_accuracy": 0.9333333333333333,
+      "slot_fields": 15,
+      "structured_valid_after_retry": 1.0,
+      "structured_first_try_valid": 1.0,
+      "llm_json_call_latency_s": {
+        "p50": 0.208,
+        "p95": 2.31,
+        "calls": 34
+      }
+    },
+    {
+      "model": "qwen/qwen3.8-27b",
+      "intent_accuracy": 1.0,
+      "intent_examples": 28,
+      "slot_field_accuracy": 1.0,
+      "slot_fields": 15,
+      "structured_valid_after_retry": 1.0,
+      "structured_first_try_valid": 1.0,
+      "llm_json_call_latency_s": {
+        "p50": 0.216,
+        "p95": 3.449,
+        "calls": 34
+      }
+    }
+  ]
+}

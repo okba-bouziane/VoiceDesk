@@ -29,6 +29,15 @@ class LLMClient(Protocol):
     def stream(self, task: str, messages: list[Message]) -> AsyncIterator[str]: ...
 
 
+def reasoning_effort(model: str) -> str | None:
+    """Reasoning models think before the first token; for voice, think as little as allowed."""
+    if "gpt-oss" in model:
+        return "low"  # gpt-oss cannot turn reasoning off
+    if "qwen3" in model:
+        return "none"
+    return None
+
+
 class OpenAICompatClient:
     """Any OpenAI-compatible chat endpoint: Groq, OpenAI, Ollama, vLLM."""
 
@@ -40,10 +49,8 @@ class OpenAICompatClient:
         )
         self.model = model
         self._temperature = temperature
-        # gpt-oss models reason before answering; keep it short for voice latency.
-        self._extra: dict[str, Any] = (
-            {"extra_body": {"reasoning_effort": "low"}} if "gpt-oss" in model else {}
-        )
+        effort = reasoning_effort(model)
+        self._extra: dict[str, Any] = {"extra_body": {"reasoning_effort": effort}} if effort else {}
 
     async def complete(self, task: str, messages: list[Message], *, json_mode: bool = False) -> str:
         kwargs: dict[str, Any] = {}
@@ -73,14 +80,43 @@ class OpenAICompatClient:
                 yield chunk.choices[0].delta.content
 
 
-def build_llm(settings: Settings | None = None) -> OpenAICompatClient:
+# Short JSON steps that block the reply; a fast non-reasoning model is enough for them.
+FAST_TASKS = frozenset({"route", "extract"})
+
+
+class TaskRoutedClient:
+    """Sends the JSON steps (route, extract) to a fast model and spoken answers to the main one."""
+
+    def __init__(self, main: LLMClient, fast: LLMClient) -> None:
+        self.main, self.fast = main, fast
+        self.model = f"{getattr(main, 'model', '?')} + {getattr(fast, 'model', '?')} for JSON"
+
+    def _pick(self, task: str) -> LLMClient:
+        return self.fast if task in FAST_TASKS else self.main
+
+    async def complete(self, task: str, messages: list[Message], *, json_mode: bool = False) -> str:
+        return await self._pick(task).complete(task, messages, json_mode=json_mode)
+
+    def stream(self, task: str, messages: list[Message]) -> AsyncIterator[str]:
+        return self._pick(task).stream(task, messages)
+
+
+def build_llm(settings: Settings | None = None) -> LLMClient:
     settings = settings or get_settings()
     cfg = load_config()["models"]["llm"][settings.llm_provider]
-    return OpenAICompatClient(
-        base_url=settings.llm_base_url or cfg["base_url"],
+    base_url = settings.llm_base_url or cfg["base_url"]
+    main = OpenAICompatClient(
+        base_url=base_url,
         api_key=settings.effective_llm_key,
         model=settings.llm_model or cfg["model"],
     )
+    fast_model = settings.fast_llm_model or cfg.get("fast_model", "")
+    if not fast_model or fast_model == "none" or fast_model == main.model:
+        return main
+    fast = OpenAICompatClient(
+        base_url=base_url, api_key=settings.effective_llm_key, model=fast_model
+    )
+    return TaskRoutedClient(main, fast)
 
 
 class StructuredOutputError(RuntimeError):

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     stt_provider: str = "groq"
     tts_provider: str = "groq"
     llm_model: str = ""
+    fast_llm_model: str = ""  # route + extract; "none" sends every step to llm_model
     stt_model: str = ""
     tts_model: str = ""
     tts_voice: str = ""

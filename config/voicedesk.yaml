@@ -1,7 +1,7 @@
 # Versioned prompts, model choices and quality thresholds.
 # Bump `version` whenever a prompt or a default model changes; the value is
 # attached to every logged turn and exported as a Prometheus label.
-version: "2026.10.1"
+version: "2026.11.1"
 
 clinic:
   name: "Riad Sample Clinic"
@@ -9,7 +9,8 @@ clinic:
 
 models:
   llm:
-    groq:   {base_url: "https://api.groq.com/openai/v1", model: "openai/gpt-oss-120b"}
+    # fast_model takes the short JSON steps (route, extract); model writes the spoken answers.
+    groq:   {base_url: "https://api.groq.com/openai/v1", model: "openai/gpt-oss-120b", fast_model: "qwen/qwen3.8-27b"}
     openai: {base_url: "https://api.openai.com/v1",      model: "gpt-4o-mini"}
     ollama: {base_url: "http://localhost:11434/v1",      model: "llama3.1:8b"}
   stt:
@@ -64,11 +65,13 @@ prompts:
   extract_booking: |
     Extract appointment details from the caller's latest message for {clinic}.
     Today is {today} ({weekday}). Resolve relative dates ("tomorrow", "next Monday") to YYYY-MM-DD using this calendar
-    of the next 14 days: {calendar}.
+    of the next 14 days: {calendar}. "Next <weekday>", "this <weekday>" and a bare weekday all mean the first
+    such day after today.
     Specialties offered: {specialties}.
     Only fill fields the caller actually stated; use null for everything else.
     Times use 24h HH:MM. Phone numbers keep digits only (a leading + is allowed).
     Already known: {known}
+    Earlier lines are context only: return null for an already known field unless the caller's latest message changes it.
     Reply with JSON only: {{"specialty": str|null, "date": str|null, "time": str|null,
     "patient_name": str|null, "patient_phone": str|null, "reason": str|null,
     "appointment_date": str|null}}

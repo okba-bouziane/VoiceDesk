@@ -70,3 +70,23 @@ def test_agent_action_is_validated_and_markdown_stripped():
         AgentAction(kind="answer", speech="")
     with pytest.raises(ValidationError):
         AgentAction(kind="fly", speech="hi")  # type: ignore[arg-type]
+
+
+async def test_json_steps_go_to_the_fast_model_and_answers_to_the_main_one():
+    from voicedesk.llm import TaskRoutedClient
+
+    main, fast = ScriptedLLM(), ScriptedLLM()
+    client = TaskRoutedClient(main, fast)
+    await client.complete("route", [{"role": "user", "content": "Caller: hi"}], json_mode=True)
+    await client.complete("extract", [{"role": "user", "content": "Caller: hi"}], json_mode=True)
+    _ = [t async for t in client.stream("answer", [{"role": "user", "content": "hi"}])]
+    assert [t for t, _ in fast.calls] == ["route", "extract"]
+    assert [t for t, _ in main.calls] == ["answer"]
+
+
+def test_reasoning_is_kept_minimal_per_model_family():
+    from voicedesk.llm import reasoning_effort
+
+    assert reasoning_effort("openai/gpt-oss-20b") == "low"
+    assert reasoning_effort("qwen/qwen3.8-27b") == "none"
+    assert reasoning_effort("llama3.1:8b") is None

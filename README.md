@@ -13,7 +13,8 @@ I built it to show a production-shaped voice-agent stack end to end, not a noteb
 - A separate **gRPC booking microservice** (Protobuf contract, Postgres, validation, status codes, health check, reflection).
 - **Hybrid RAG** on Postgres + **pgvector**: local `BAAI/bge-small-en-v1.5` embeddings (fastembed), full-text search, fused with reciprocal rank fusion.
 - **Structured outputs** validated with Pydantic, with retry on invalid model output.
-- **MLOps basics**: prompts and model choices versioned in one YAML file, per-turn latency metrics (JSON logs and Prometheus), an eval gate in CI.
+- **MLOps basics**: prompts and model choices versioned in one YAML file, per-turn latency metrics (JSON logs and Prometheus), an eval gate in CI, and a latency benchmark with p50 / p95 per stage.
+- **Latency work, measured**: a fast non-reasoning model for the JSON steps and slot extraction started in parallel with routing took the time to the first reply token from p50 0.919 s to 0.474 s (p95 1.567 s to 0.831 s) over 57 spoken turns.
 
 **Live demo: https://voicedesk-beta.vercel.app** (press Start call, allow the microphone, or type). Sample data only.
 
@@ -73,13 +74,17 @@ sequenceDiagram
     A->>S: utterance audio
     S-->>A: transcript
     A->>G: chat context (last user message)
-    G->>M: route intent (JSON, validated, retried if invalid)
+    par in the middle of a booking or cancel flow
+        G->>M: route intent (fast model, JSON, validated, retried if invalid)
+    and
+        G->>M: extract slots early (fast model, used only if routing stays in the flow)
+    end
     alt clinic question
         G->>R: embed question, hybrid search (vector + full text, RRF)
         R-->>G: top 3 chunks
         G->>M: answer from context only (streamed)
     else booking, cancel or list
-        G->>M: extract slots (JSON, validated)
+        G->>M: extract slots (fast model, unless already extracted early)
         G->>B: CheckAvailability / BookAppointment / CancelAppointment / ListAppointments
         B-->>G: result or gRPC status
     end
@@ -103,6 +108,10 @@ sequenceDiagram
 | `faq` | Hybrid search, a relevance gate, then an answer generated from the retrieved context only, streamed token by token. Off-topic or unknown questions are refused with an offer of a human. |
 | `handoff` | Staff handoff flag plus an emergency notice. |
 | `decline_flow`, `smalltalk` | Drop the current flow, greet. |
+
+**Two models.** The short JSON steps (route and extract) go to a fast non-reasoning model (`fast_model` in `config/voicedesk.yaml`, `qwen/qwen3.8-27b` on Groq with reasoning off); the spoken answers stay on `gpt-oss` (`model`). `voicedesk/llm.py` routes each call by task name.
+
+**Early extraction.** In the middle of a booking or cancel flow, the next node almost always extracts slots, so `route` starts that call at the same time as the routing call. The result is used only if routing lands on that flow with the same known slots; otherwise it is cancelled. Two tests check that the extraction starts before routing ends and that a dropped extraction never changes the slots.
 
 The routing function `decide(state, intent)` is pure and table-tested. Every leaf node builds an `AgentAction` Pydantic model (kind, speech, sources, handoff flag), which is validated before it is spoken. Any exception inside a node (provider outage, rate limit) becomes a spoken apology, so the session survives.
 
@@ -139,16 +148,17 @@ All numbers below are from runs in this repository. Nothing is estimated.
 
 Hybrid recall@1 is 0.875. The "answer or abstain" gate classifies 35 of 38 questions correctly (0.921). On this small, clean corpus plain vector search is as good as hybrid (slightly better MRR); I report that as it is. Hybrid is kept because keyword matches (names, "CHIFA", prices) are where embeddings are weakest on larger corpora, but this set does not prove that.
 
-**Live model checks** (`python -m scripts.eval`, Groq free tier; 28 intent utterances, 6 extraction cases, 15 slot fields):
+**Live model checks** (Groq free tier; 28 intent utterances, 6 extraction cases, 15 slot fields). `python -m scripts.compare_routing` runs them per model with prompt version 2026.11.1 and writes `docs/routing-models.json`:
 
-| Model | Intent accuracy | Slot field accuracy | Valid JSON first try | Valid after retry |
+| Model for route + extract | Intent accuracy | Slot field accuracy | Valid JSON first try | JSON call p50 |
 |---|---|---|---|---|
-| `openai/gpt-oss-120b` (run before the 14-day calendar was added to the extraction prompt) | 0.964 | 1.000 | 1.000 | 1.000 |
-| `openai/gpt-oss-20b` (current `docs/eval-results.json`) | 0.929 | 1.000 | 1.000 | 1.000 |
+| `qwen/qwen3.8-27b`, reasoning off (the default `fast_model`) | **1.000** | **1.000** | 1.000 | 0.216 s |
+| `openai/gpt-oss-20b`, reasoning low | 0.929 | 0.933 | 1.000 | 0.208 s |
+| `openai/gpt-oss-120b` (older run, before the 14-day calendar was added to the prompt) | 0.964 | 1.000 | 1.000 | |
 
-The sets are small, so treat these as smoke-level numbers, not benchmarks. An earlier 20b run resolved "next Sunday" to the wrong date, which is why the extraction prompt now carries a 14-day calendar.
+The sets are small, so treat these as smoke-level numbers, not benchmarks. The single-call p50 is similar for both models; the turn-level gain comes from qwen not spending reasoning tokens before its first token in streamed answers and from the parallel extraction (see Latency). An earlier 20b run resolved "next Sunday" to the wrong date, which is why the extraction prompt carries a 14-day calendar; the live test also caught qwen re-reading an already known date a week later, so the prompt now says that earlier lines are context only. "Next Sunday" is still read two ways by models (the coming Sunday or the one after), so `resolve_weekday` in `voicedesk/graph.py` now settles it in code: a single named weekday with no explicit date means the first such day after today (8 table tests).
 
-**Tests** (`pytest`): 106 tests. The ones that need Postgres with pgvector skip when it is not reachable (CI runs them against a pgvector service), and the 3 live ones need an LLM key.
+**Tests** (`pytest`): 118 tests. The ones that need Postgres with pgvector skip when it is not reachable (CI runs them against a pgvector service), and the 3 live ones need an LLM key.
 
 | File | What it covers |
 |---|---|
@@ -171,21 +181,28 @@ Every turn is logged as one JSON line (`turn_latency {...}`), published to the w
 
 ![Prometheus metrics](docs/screenshots/metrics.png)
 
-Budget for the time from the caller stopping to the first audio of the answer, and what I measured:
+### Benchmark: 57 spoken turns, before and after
 
-| Stage | Target | Measured here |
-|---|---|---|
-| Endpointing (VAD plus turn detector wait) | 0.5 s min delay (configurable) | not measured (needs live speech) |
-| STT, Groq `whisper-large-v3-turbo` | < 0.5 s | 0.33, 0.38, 0.60 s on three short synthetic utterances (macOS `say`) |
-| Graph and LLM, first token | < 1 s | `gpt-oss-20b`: 0.66, 0.79, 0.73 s. `gpt-oss-120b`: 1.1, 1.8, 2.6 s (3 turns, route plus extract or answer are sequential LLM calls). `gpt-oss-20b` through the full stack in text mode: mean 0.82 s over 4 turns |
-| TTS first audio, Groq Orpheus | < 0.4 s | 0.53, 0.24, 0.24 s (first sentence of each reply, same 3 turns) |
-| STT + LLM first token + TTS first audio (sum, no endpointing wait) | about 2 s | 1.57, 1.33, 1.27 s with `gpt-oss-20b` (`scripts/voice_roundtrip.py`, sequential stages, not a live room) |
+`scripts/latency_bench.py` plays 6 scripted calls (FAQ, a full booking, availability, a cancellation, a handoff; 19 turns) three times. Each turn is spoken with the macOS voice, transcribed by Groq Whisper, run through the real graph (SQLite booking service, in-memory search) and timed to the first reply token. Turns are paced 10 s apart so the free tier's 8,000 tokens per minute are never hit. Results: `docs/latency/*.json` (every turn, plus p50 / p95 / max, nearest-rank).
 
-The honest summary: STT plus first LLM token was about 1.4 to 3.2 s on `gpt-oss-120b`. That is above a comfortable voice budget, mostly because each turn makes two sequential model calls (route, then extract or answer) on a reasoning model. Obvious next steps are listed under limitations.
+| Version | Models | LLM first token p50 / p95 | STT + LLM first token p50 / p95 |
+|---|---|---|---|
+| Before (commit `5932497`, prompt 2026.10.1) | `gpt-oss-20b` for every step | 0.919 / 1.567 s | 1.221 / 1.973 s |
+| **Now** (prompt 2026.11.1) | `gpt-oss-20b` answers, `qwen3.8-27b` route + extract, early extraction | **0.474 / 0.831 s** | **0.780 / 1.177 s** |
+| Variant (prompt 2026.10.1) | `qwen3.8-27b` for every step | 0.429 / 1.044 s | 0.745 / 1.442 s |
 
-### Measured in a live room
+- The time to the first reply token is about halved at p50 and p95. STT is unchanged (p50 0.307 s).
+- The replies stayed the same on the booking, FAQ, cancel and handoff turns; "goodbye" and "yes, cancel it" were handled wrongly before and correctly now.
+- Using qwen for the spoken answers too would be slightly faster at p50, but the answers stay on gpt-oss, the model the live tests and the earlier answer checks used.
+- The slowest turn in the final run took 4.72 s to the first token: one provider-side outlier, kept in the data.
 
-One spoken booking against the hosted demo (headless Chrome with a fake microphone playing a synthetic WAV, `scripts/live_check.js`): on the last turn the agent reported endpointing plus transcript 0.94 s, LLM first token 0.46 s and TTS first audio 0.19 s, 1.59 s from the end of the caller's speech to the first audio of the reply. That is one turn, not a distribution.
+**TTS first audio** (Groq Orpheus, first sentence of each reply) was measured on a separate 38-turn run, because this free model allows only 100 requests a day: **p50 0.254 s, p95 1.299 s**, with no rate-limit errors (`docs/latency/fast-json-parallel-tts.json`). The LLM timings of that run are not used: other calls on the same key overlapped it.
+
+Not measured: the endpointing wait (VAD and turn detector, 0.5 s minimum by configuration) and network time to a real browser. The earlier live-room check below is the only end-to-end number from a real room.
+
+### Measured in a live room (before this change)
+
+One spoken booking against the hosted demo (headless Chrome with a fake microphone playing a synthetic WAV, `scripts/live_check.js`): on the last turn the agent reported endpointing plus transcript 0.94 s, LLM first token 0.46 s and TTS first audio 0.19 s, 1.59 s from the end of the caller's speech to the first audio of the reply. That is one turn, not a distribution, and the hosted demo has not been redeployed with the new version yet.
 
 ![Live demo run](docs/screenshots/live-demo.png)
 
@@ -219,7 +236,7 @@ pytest -q && python -m scripts.eval
 scripts/gen_proto.sh                         # regenerate stubs after editing the proto
 ```
 
-`scripts/voice_roundtrip.py` runs synthetic caller audio through STT, the graph and TTS and prints each stage's latency without a microphone. `scripts/browser_demo.js` drives the web client in headless Chrome (used for the screenshots).
+`scripts/voice_roundtrip.py` runs synthetic caller audio through STT, the graph and TTS and prints each stage's latency without a microphone. `scripts/latency_bench.py --label <name> [--tts]` runs the 57-turn benchmark above (it needs the booking service; `BOOKING_STORE=sqlite RAG_BACKEND=memory` avoids Postgres). `scripts/browser_demo.js` drives the web client in headless Chrome (used for the screenshots).
 
 ## Configuration
 
@@ -230,6 +247,7 @@ scripts/gen_proto.sh                         # regenerate stubs after editing th
 | `STT_PROVIDER` | `groq` | `groq`, `openai`, `deepgram` |
 | `TTS_PROVIDER` | `groq` | `groq`, `openai`, `cartesia`, `none` (text-only) |
 | `LLM_MODEL`, `STT_MODEL`, `TTS_MODEL`, `TTS_VOICE` | from YAML | Override the model names in `config/voicedesk.yaml` |
+| `FAST_LLM_MODEL` | from YAML | Model for the route and extract steps; `none` sends every step to `LLM_MODEL` |
 | `LLM_BASE_URL`, `LLM_API_KEY` | from YAML | Point at any OpenAI-compatible server |
 | `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY` | | Keys for the swappable providers |
 | `TURN_DETECTION` | `model` | `model` (LiveKit turn-detector model) or `vad` |
@@ -255,14 +273,14 @@ server/           FastAPI token server, /healthz, /metrics, web client (static)
 proto/            Protobuf contract
 config/           versioned prompts, models and thresholds
 data/             sample clinic documents and labelled eval sets
-scripts/          init_data, eval, chat, voice_roundtrip, proto generation, screenshots
+scripts/          init_data, eval, compare_routing, latency_bench, chat, voice_roundtrip, proto generation, screenshots
 tests/            pytest suite
 ```
 
 ## Limitations
 
-- Voice latency is measured on a handful of turns only (the round-trip script and one live-room call with a synthetic voice). I have not tested real microphones, accents or noisy rooms.
-- Two sequential LLM calls per turn on a reasoning model are slow for voice. Likely fixes: run routing and extraction concurrently, use a small non-reasoning model for them, and cache the routing prompt.
+- The latency benchmark uses a synthetic voice, scripted calls and sequential stages outside a LiveKit room; the endpointing wait and the browser's network are not in it. I have not tested real microphones, accents or noisy rooms.
+- Routing and the answer are still two sequential model calls on FAQ turns. Starting the search and the answer speculatively, or one call that routes and answers, would cut more.
 - Dates and times are resolved by the model with a calendar hint; the gRPC service rejects impossible values, but a wrong-but-valid date would be booked after the caller confirms the read-back. The read-back is the safeguard.
 - Appointments are identified by phone number only (no real authentication), and a booking is a sample record, not a real system of record.
 - No barge-in tuning, background noise handling or telephony (SIP) integration. The adaptive interruption model is disabled by default by LiveKit in production mode; VAD-based interruption is used.

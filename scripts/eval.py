@@ -120,7 +120,7 @@ async def eval_live() -> dict:
             )
     n_calls = len(attempts)
     return {
-        "model": llm.model,
+        "model": getattr(llm, "model", "?"),
         "intent_accuracy": correct / len(data["intents"]),
         "intent_examples": len(data["intents"]),
         "slot_field_accuracy": fields_ok / fields_total,

@@ -63,14 +63,16 @@ async def transcribe(stt: lk_stt.STT, audio: rtc.AudioFrame) -> tuple[str, float
     return event.alternatives[0].text.strip(), time.perf_counter() - start
 
 
-async def run_graph(runtime: Runtime, turn: int, text: str) -> tuple[str, float, float]:
+async def run_graph(
+    runtime: Runtime, turn: int, text: str, thread_id: str = "rt"
+) -> tuple[str, float, float]:
     """Returns the reply, the time to its first token and the time to the whole reply."""
     start = time.perf_counter()
     first: float | None = None
     chunks: list[str] = []
     async for chunk in runtime.graph.astream(
         {"messages": [HumanMessage(text, id=f"u{turn}")]},
-        {"configurable": {"thread_id": "rt"}},
+        {"configurable": {"thread_id": thread_id}},
         stream_mode="custom",
     ):
         first = first or time.perf_counter() - start
@@ -88,11 +90,17 @@ async def tts_first_audio(tts: lk_tts.TTS, reply: str) -> float | None:
 
 
 async def measure_turn(
-    runtime: Runtime, stt: lk_stt.STT, tts: lk_tts.TTS, turn: int, question: str
+    runtime: Runtime,
+    stt: lk_stt.STT,
+    tts: lk_tts.TTS,
+    turn: int,
+    question: str,
+    thread_id: str = "rt",
+    speak: bool = True,
 ) -> dict[str, Any]:
     heard, stt_s = await transcribe(stt, caller_audio(question))
-    reply, first_token_s, llm_total_s = await run_graph(runtime, turn, heard)
-    tts_s = await tts_first_audio(tts, reply)
+    reply, first_token_s, llm_total_s = await run_graph(runtime, turn, heard, thread_id)
+    tts_s = await tts_first_audio(tts, reply) if speak else None
     return {
         "asked": question,
         "heard": heard,

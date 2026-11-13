@@ -4,9 +4,11 @@ stream so the LiveKit agent can pipe it to TTS token by token."""
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import functools
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Any, TypedDict, TypeVar, cast
@@ -57,6 +59,36 @@ class Deps:
 def calendar_text(today: dt.date) -> str:
     days = (today + dt.timedelta(days=i) for i in range(14))
     return ", ".join(f"{d.strftime('%A')} {d.isoformat()}" for d in days)
+
+
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_EXPLICIT_DATE = re.compile(
+    r"\d{1,2}(st|nd|rd|th)?\s+(of\s+)?(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+    r"|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2}\b"
+    r"|\d{1,2}[/.-]\d{1,2}|\d{4}-\d{2}-\d{2}|after next|following|in two weeks|the week after",
+    re.I,
+)
+
+
+def resolve_weekday(text: str, today: dt.date, model_date: dt.date | None) -> dt.date | None:
+    """Make "Sunday" / "this Sunday" / "next Sunday" mean the first Sunday after today.
+
+    Models disagree on "next Sunday" (the coming one, or the one after). When the caller's
+    message names exactly one weekday and no explicit date, and the model picked that weekday,
+    the date is set deterministically. Anything else keeps the model's date; the read-back
+    before booking remains the final check.
+    """
+    if model_date is None:
+        return None
+    words = re.findall(r"[a-z]+", text.lower())
+    named = {w for w in words if w in WEEKDAYS}
+    if len(named) != 1 or _EXPLICIT_DATE.search(text):
+        return model_date
+    target = WEEKDAYS.index(named.pop())
+    if model_date.weekday() != target:
+        return model_date
+    ahead = (target - today.weekday()) % 7 or 7
+    return today + dt.timedelta(days=ahead)
 
 
 def say_date(d: dt.date) -> str:
@@ -209,6 +241,8 @@ class ConversationNodes:
         self._deps = deps
         self._llm = deps.llm
         self._tools = deps.tools
+        # Slot extraction started while the router is still deciding (see `route`).
+        self._early: tuple[tuple[Any, ...], asyncio.Task[SlotUpdate]] | None = None
 
     # ---- routing
     @_safe
@@ -221,6 +255,7 @@ class ConversationNodes:
             flow=state.get("flow", "none"),
             awaiting=state.get("awaiting", "none") != "none",
         )
+        self._start_early_extract(state)
         try:
             result = await structured_call(
                 self._llm,
@@ -236,11 +271,53 @@ class ConversationNodes:
             intent = Intent.OTHER
         return {"intent": intent.value, "action": {}}
 
-    @staticmethod
-    def after_route(state: State) -> str:
+    def after_route(self, state: State) -> str:
         if not last_user_text(state).strip() or state.get("action", {}).get("kind") == "error":
-            return END
-        return decide(state, Intent(state["intent"]))
+            nxt = END
+        else:
+            nxt = decide(state, Intent(state["intent"]))
+        if nxt not in ("booking", "manage"):
+            self._drop_early_extract()
+        return nxt
+
+    # ---- slot extraction
+    @staticmethod
+    def _known(state: State, flow: str) -> dict[str, Any]:
+        """What the extractor is told is already known, per flow."""
+        if flow == "booking":
+            slots = BookingSlots(**(state.get("slots") or {}))
+            return {k: str(v) for k, v in slots.model_dump().items() if v is not None}
+        return {"phone": state["phone"]} if state.get("phone") else {}
+
+    @staticmethod
+    def _early_key(state: State, known: dict[str, Any]) -> tuple[Any, ...]:
+        return (len(state.get("messages", [])), last_user_text(state), sorted(known.items()))
+
+    def _start_early_extract(self, state: State) -> None:
+        """In the middle of a booking or cancel flow the next node almost always extracts slots,
+        so start that call now, in parallel with the router, instead of after it. The result is
+        used only if routing lands on that flow with the same known slots; otherwise it is dropped."""
+        self._drop_early_extract()
+        flow = state.get("flow", "none")
+        if flow == "none" or state.get("awaiting", "none") != "none":
+            return
+        known = self._known(state, flow)
+        task = asyncio.ensure_future(self._extract(state, known))
+        self._early = (self._early_key(state, known), task)
+
+    def _drop_early_extract(self) -> None:
+        if self._early is not None:
+            self._early[1].cancel()
+            self._early = None
+
+    async def _extract_slots(self, state: State, known: dict[str, Any]) -> SlotUpdate:
+        early, self._early = self._early, None
+        if early is not None:
+            key, task = early
+            if key == self._early_key(state, known):
+                return await task
+            task.cancel()
+        return await self._extract(state, known)
 
     async def _extract(self, state: State, known: dict[str, Any]) -> SlotUpdate:
         today = self._deps.today()
@@ -253,7 +330,7 @@ class ConversationNodes:
             known=known or "nothing yet",
         )
         try:
-            return await structured_call(
+            update = await structured_call(
                 self._llm,
                 "extract",
                 SlotUpdate,
@@ -264,6 +341,8 @@ class ConversationNodes:
             )
         except StructuredOutputError:
             return SlotUpdate()
+        update.date = resolve_weekday(last_user_text(state), today, update.date)
+        return update
 
     # ---- booking flow
     def _sanitise(self, update: SlotUpdate) -> str:
@@ -283,8 +362,8 @@ class ConversationNodes:
     @_safe
     async def booking(self, state: State) -> dict[str, Any]:
         slots = BookingSlots(**(state.get("slots") or {}))
-        known = {k: str(v) for k, v in slots.model_dump().items() if v is not None}
-        update = await self._extract(state, known)
+        known = self._known(state, "booking")
+        update = await self._extract_slots(state, known)
         note = self._sanitise(update)
         slots = slots.merge(update)
         patch: dict[str, Any] = {"flow": "booking", "awaiting": "none"}
@@ -395,8 +474,8 @@ class ConversationNodes:
             flow = "list"
         else:
             flow = state.get("flow", "cancel")
-        known = {"phone": state["phone"]} if state.get("phone") else {}
-        update = await self._extract(state, known)
+        known = self._known(state, flow)
+        update = await self._extract_slots(state, known)
         phone = update.patient_phone or state.get("phone")
         patch: dict[str, Any] = {"flow": flow, "awaiting": "none", "phone": phone}
         if not phone:

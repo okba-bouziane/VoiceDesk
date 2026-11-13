@@ -181,3 +181,74 @@ def test_offered_times_are_distinct_when_doctors_share_a_slot():
         SlotInfo("dr-a", "Dr. A", "general medicine", "2026-10-26", "10:30"),
     ]
     assert distinct_times(free) == ["9:00 AM", "9:30 AM", "10:00 AM"]
+
+
+class SlowRouteLLM(ScriptedLLM):
+    """Routing takes 50 ms, so an extraction that starts after it cannot finish before it."""
+
+    def __init__(self, extracts: dict | None = None) -> None:
+        super().__init__(ROUTES, extracts or EXTRACTS)
+        self.events: list[str] = []
+
+    async def complete(self, task, messages, *, json_mode=False):
+        import asyncio
+
+        self.events.append(f"start:{task}")
+        if task == "route":
+            await asyncio.sleep(0.05)
+        reply = await super().complete(task, messages, json_mode=json_mode)
+        self.events.append(f"end:{task}")
+        return reply
+
+
+async def test_mid_flow_extraction_runs_in_parallel_with_routing():
+    llm = SlowRouteLLM()
+    graph, _, _ = make_graph(llm=llm)
+    c = Convo(graph)
+    await c.say("I want to book a dentist")  # no flow yet: route first, then extract
+    assert llm.events[:3] == ["start:route", "end:route", "start:extract"]
+    llm.events.clear()
+    r = await c.say("Sunday")
+    assert "10:00 AM" in r
+    # the extraction started before routing finished, and was not repeated after it
+    assert llm.events.index("start:extract") < llm.events.index("end:route")
+    assert llm.events.count("start:extract") == 1
+
+
+async def test_early_extraction_is_dropped_when_the_caller_changes_topic():
+    # if the speculative extraction were applied, the specialty would change to dermatology
+    llm = SlowRouteLLM({**EXTRACTS, "opening hours": {"specialty": "dermatology"}})
+    graph, _, _ = make_graph(llm=llm)
+    c = Convo(graph)
+    await c.say("I want to book a dentist")
+    r = await c.say("what are your opening hours")  # mid-booking question goes to the FAQ
+    assert "open" in r.lower()
+    assert c.state()["flow"] == "booking"
+    assert c.state()["slots"]["specialty"] == "dentistry"
+
+
+@pytest.mark.parametrize(
+    ("text", "model_date", "expected"),
+    [
+        (
+            "book me next Sunday at 10",
+            "2026-11-01",
+            "2026-10-25",
+        ),  # the week-after reading is corrected
+        ("this Sunday please", "2026-10-25", "2026-10-25"),
+        ("on Wednesday", "2026-10-21", "2026-10-28"),  # today is Wednesday: the next one, not today
+        ("Sunday after next", "2026-11-01", "2026-11-01"),  # explicit: keep the model's date
+        ("Sunday 1 November", "2026-11-01", "2026-11-01"),
+        ("Sunday or Monday", "2026-10-26", "2026-10-26"),  # two weekdays: keep
+        ("tomorrow", "2026-10-22", "2026-10-22"),  # no weekday named: keep
+        ("next Sunday", "2026-10-27", "2026-10-27"),  # model picked another weekday: keep
+    ],
+)
+def test_weekday_phrases_resolve_to_the_first_such_day(text, model_date, expected):
+    import datetime as dt
+
+    from tests.fakes import FAKE_TODAY
+    from voicedesk.graph import resolve_weekday
+
+    got = resolve_weekday(text, FAKE_TODAY, dt.date.fromisoformat(model_date))
+    assert got == dt.date.fromisoformat(expected)
